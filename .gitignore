@@ -31,3 +31,11 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# 构建产物
+/linx-emu
+/linx-mock
+/bin/
+
+# macOS
+.DS_Store

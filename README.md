@@ -38,6 +38,14 @@ go run ./cmd/linx-emu -mac E4:5F:01:23:45:67
 # 3. 免麦克风验证 tools/call：用 listen.detect 注入一句话
 go run ./cmd/linx-emu -mac E4:5F:01:23:45:67 -say "把音量调到30"
 
+# 3b. 用电脑麦克风说话（需要 ffmpeg，macOS 首次会请求麦克风权限）
+go run ./cmd/linx-emu -mac E4:5F:01:23:45:67 -mic 0 -mic-duration 6s
+
+# 3c. 用 WAV 当麦克风（16k 单声道 16bit），可复现、适合 CI
+say -o /tmp/a.aiff "把音量调到三十"
+afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/a.aiff /tmp/a.wav
+go run ./cmd/linx-emu -mac E4:5F:01:23:45:67 -wav /tmp/a.wav
+
 # 4. 验证打断，并在打断后于同一 session 再问一次
 go run ./cmd/linx-emu -mac E4:5F:01:23:45:67 -say "现在几点" -abort 1500ms
 ```

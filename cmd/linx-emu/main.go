@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -19,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -38,6 +40,9 @@ func main() {
 	otaURL := flag.String("ota", defOTA, "OTA 地址")
 	listen := flag.Bool("listen", true, "连上后发 listen start")
 	say := flag.String("say", "", "连上后用 listen.detect 注入一句话，免麦克风验证 tools/call")
+	wav := flag.String("wav", "", "连上后把 WAV（16k 单声道 16bit）当麦克风上行，验证真实录音链路")
+	mic := flag.String("mic", "", "用电脑麦克风说话：传 ffmpeg 的音频设备号，如 0（macOS 需装 ffmpeg）")
+	micDur := flag.Duration("mic-duration", 6*time.Second, "麦克风采集时长")
 	abortAfter := flag.Duration("abort", 0, "TTS 开始后多久发 abort 打断（如 1500ms）")
 	flag.Parse()
 
@@ -167,10 +172,121 @@ func main() {
 				})
 				log.Printf(">> listen detect %q", *say)
 			}
+			if *wav != "" {
+				go streamWAV(conn, *wav, msg.SessionID)
+			}
+			if *mic != "" {
+				go streamMic(conn, *mic, *micDur, msg.SessionID)
+			}
 		case "mcp":
 			reply(conn, msg.Payload)
 		}
 	}
+}
+
+// streamWAV 把 WAV 的 PCM 数据按 20ms 一帧发上去，模拟麦克风。
+// 用来验证"设备自己采集的原声能不能走通灵矽 ASR"。
+func streamWAV(conn *websocket.Conn, path, sessionID string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("读 WAV 失败: %v", err)
+		return
+	}
+	pcm, err := wavData(raw)
+	if err != nil {
+		log.Printf("解析 WAV 失败: %v", err)
+		return
+	}
+	log.Printf(">> 开始上行 %d 字节 PCM（%.1fs）", len(pcm), float64(len(pcm))/32000)
+
+	time.Sleep(1200 * time.Millisecond) // 等 MCP 初始化完成
+	_ = conn.WriteJSON(map[string]any{
+		"type": "listen", "state": "start", "mode": "manual", "session_id": sessionID,
+	})
+
+	const frame = 640 // 320 samples * 2 bytes = 20ms @16k
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for off := 0; off+frame <= len(pcm); off += frame {
+		<-t.C
+		if err := conn.WriteMessage(websocket.BinaryMessage, pcm[off:off+frame]); err != nil {
+			log.Printf("上行失败: %v", err)
+			return
+		}
+	}
+	_ = conn.WriteJSON(map[string]any{"type": "listen", "state": "stop", "session_id": sessionID})
+	log.Print(">> 上行结束，已发 listen stop")
+}
+
+// streamMic 用 ffmpeg 采集电脑麦克风，转成 16k 单声道 s16 裸流后按 20ms 一帧上行。
+// 走外部进程而不是 cgo，二进制保持纯 Go。
+func streamMic(conn *websocket.Conn, device string, dur time.Duration, sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), dur+2*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", "avfoundation", "-i", ":"+device,
+		"-ar", "16000", "-ac", "1", "-f", "s16le", "-",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("麦克风启动失败: %v", err)
+		return
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Printf("麦克风启动失败: %v（macOS 需先给终端麦克风权限）", err)
+		return
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	time.Sleep(800 * time.Millisecond) // 等 ffmpeg 打开设备
+	_ = conn.WriteJSON(map[string]any{
+		"type": "listen", "state": "start", "mode": "manual", "session_id": sessionID,
+	})
+	log.Printf(">> 麦克风已开（%s），%s 内请说话", device, dur)
+
+	const frame = 640
+	buf := make([]byte, frame)
+	total := 0
+	for total*20 < int(dur/time.Millisecond)*1000 {
+		if _, err := io.ReadFull(stdout, buf); err != nil {
+			break
+		}
+		if err := conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+			log.Printf("上行失败: %v", err)
+			return
+		}
+		total++
+	}
+	_ = conn.WriteJSON(map[string]any{"type": "listen", "state": "stop", "session_id": sessionID})
+	log.Printf(">> 麦克风结束，共上行 %d 帧", total)
+}
+
+// wavData 取 WAV 里 data chunk 的裸 PCM。
+func wavData(raw []byte) ([]byte, error) {
+	if len(raw) < 44 || string(raw[0:4]) != "RIFF" || string(raw[8:12]) != "WAVE" {
+		return nil, fmt.Errorf("不是 WAV")
+	}
+	off := 12
+	for off+8 <= len(raw) {
+		id := string(raw[off : off+4])
+		size := int(raw[off+4]) | int(raw[off+5])<<8 | int(raw[off+6])<<16 | int(raw[off+7])<<24
+		off += 8
+		if id == "data" {
+			end := off + size
+			if end > len(raw) {
+				end = len(raw)
+			}
+			return raw[off:end], nil
+		}
+		off += size + size%2
+	}
+	return nil, fmt.Errorf("没有 data chunk")
 }
 
 // reply 应答一条 JSON-RPC。只实现 initialize / tools/list / tools/call。

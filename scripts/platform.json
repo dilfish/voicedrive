@@ -1,0 +1,10 @@
+{
+  "name": "send-voice-platform",
+  "steps": [
+    {"name":"device hello", "action":"expect", "expect":{"type":"hello","features.mcp":true}},
+    {"name":"recognized speech", "action":"send", "send":{"type":"stt","text":"给夜班组说一句我快到了"}},
+    {"name":"call send voice", "action":"send", "send":{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"group.send_voice","arguments":{"group":"夜班组","text":"我快到了"}}}}},
+    {"name":"tool receipt", "action":"expect", "expect":{"type":"mcp","payload.id":1,"payload.result.isError":false,"payload.result.content.0.text":"已发送"}},
+    {"name":"close session", "action":"disconnect"}
+  ]
+}

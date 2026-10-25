@@ -1,0 +1,8 @@
+{
+  "name":"tool-error",
+  "steps":[
+    {"name":"hello", "action":"expect", "expect":{"type":"hello"}},
+    {"name":"unknown tool", "action":"send", "send":{"type":"mcp","payload":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mock.unknown","arguments":{}}}}},
+    {"name":"assert tool error", "action":"expect", "expect":{"payload.id":2,"payload.result.isError":true,"payload.result.content.0.text":"unknown tool"}}
+  ]
+}

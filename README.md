@@ -17,4 +17,15 @@ curl -X POST localhost:8080/v1/devices \
   -d '{"mac":"AA:BB:CC:DD:EE:01","name":"老王"}'
 ```
 
+设备控制面 WebSocket 地址为 `ws://localhost:8080/v1/device`，使用 `X-VD-MAC` Header 标识设备。设备可以加入多个群，但服务端只向设备当前 `active_group_id` 对应的群转发和补发消息；切换焦点群后，收听目标随之切换。服务端下发 `message`，设备上行带 `group_id` 的 `played` 和 `heartbeat`；确认序号按设备和群分别保存，重连后当前焦点群最多补发 50 条消息。
+
+切换焦点群：
+
+```bash
+curl -X POST localhost:8080/v1/groups/<group-id>/switch \
+  -H 'X-VD-MAC: AA:BB:CC:DD:EE:01'
+```
+
+设备在线时，切换成功还会收到 `group_changed` 帧，设备应清空旧群播放队列并切换到返回的群。
+
 完整的开发协作文档见 [docs/collaboration](docs/collaboration/README.md)。

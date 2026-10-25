@@ -44,5 +44,13 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS device_group_acks (
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    last_acked_seq BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (device_id, group_id)
+);
+
 CREATE INDEX IF NOT EXISTS memberships_device_idx ON memberships(device_id);
 CREATE INDEX IF NOT EXISTS messages_group_seq_idx ON messages(group_id, seq);

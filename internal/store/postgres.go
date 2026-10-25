@@ -46,6 +46,10 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, string(schemaSQL)); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if _, err := p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id)
+SELECT device_id,group_id FROM memberships ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("backfill device group acknowledgements: %w", err)
+	}
 	return nil
 }
 
@@ -66,6 +70,139 @@ RETURNING id::text, mac, name, agent_id, active_group_id::text, last_acked_seq, 
 		return model.Device{}, fmt.Errorf("ensure device: %w", err)
 	}
 	return d, nil
+}
+
+// DeviceByMAC returns the device registered with mac.
+func (p *Postgres) DeviceByMAC(ctx context.Context, mac string) (model.Device, error) {
+	var d model.Device
+	err := p.db.QueryRowContext(ctx, `SELECT id::text,mac,name,agent_id,active_group_id::text,last_acked_seq,last_seen_at
+FROM devices WHERE mac=$1`, mac).
+		Scan(&d.ID, &d.MAC, &d.Name, &d.AgentID, &d.ActiveGroupID, &d.LastAckedSeq, &d.LastSeenAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Device{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Device{}, fmt.Errorf("find device by mac: %w", err)
+	}
+	return d, nil
+}
+
+// PendingMessages returns at most limit messages for the device's active group.
+func (p *Postgres) PendingMessages(ctx context.Context, deviceID string, limit int) ([]model.DeviceMessage, error) {
+	if limit <= 0 {
+		return []model.DeviceMessage{}, nil
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT m.id::text,m.group_id::text,m.from_device_id::text,m.text,
+m.audio_url,m.duration_ms,m.seq,m.created_at,g.name
+FROM messages m JOIN memberships member ON member.group_id=m.group_id
+JOIN devices d ON d.id=member.device_id JOIN groups g ON g.id=m.group_id
+JOIN device_group_acks ack ON ack.device_id=d.id AND ack.group_id=m.group_id
+WHERE d.id=$1 AND m.group_id=d.active_group_id AND m.seq > ack.last_acked_seq
+ORDER BY m.created_at,m.group_id,m.seq LIMIT $2`, deviceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query pending messages: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = fmt.Errorf("close pending messages: %w", closeErr)
+		}
+	}()
+	messages := make([]model.DeviceMessage, 0, limit)
+	for rows.Next() {
+		var message model.DeviceMessage
+		if err := rows.Scan(&message.ID, &message.GroupID, &message.FromDeviceID, &message.Text,
+			&message.AudioURL, &message.DurationMS, &message.Seq, &message.CreatedAt, &message.GroupName); err != nil {
+			return nil, fmt.Errorf("scan pending message: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending messages: %w", err)
+	}
+	return messages, nil
+}
+
+// AckDevice advances a device's acknowledged sequence without allowing it to go backwards.
+func (p *Postgres) AckDevice(ctx context.Context, deviceID, groupID string, seq int64) error {
+	if seq < 0 {
+		return errors.New("sequence must not be negative")
+	}
+	result, err := p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id,last_acked_seq,updated_at)
+VALUES($1,$2,$3,NOW()) ON CONFLICT(device_id,group_id) DO UPDATE
+SET last_acked_seq=GREATEST(device_group_acks.last_acked_seq,EXCLUDED.last_acked_seq),updated_at=NOW()`, deviceID, groupID, seq)
+	if err != nil {
+		return fmt.Errorf("ack device message: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read ack result: %w", err)
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	if _, err := p.db.ExecContext(ctx, `UPDATE devices SET last_seen_at=NOW() WHERE id=$1`, deviceID); err != nil {
+		return fmt.Errorf("update device heartbeat: %w", err)
+	}
+	return nil
+}
+
+// MemberDeviceIDs returns all devices in a group.
+func (p *Postgres) MemberDeviceIDs(ctx context.Context, groupID string) ([]string, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT m.device_id::text FROM memberships m JOIN devices d ON d.id=m.device_id
+WHERE m.group_id=$1 AND d.active_group_id=$1`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("query group members: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = fmt.Errorf("close group members: %w", closeErr)
+		}
+	}()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan group member: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate group members: %w", err)
+	}
+	return ids, nil
+}
+
+// SwitchActiveGroup changes the device's focus to a group it belongs to.
+func (p *Postgres) SwitchActiveGroup(ctx context.Context, mac, groupID string) (model.Group, error) {
+	var group model.Group
+	err := p.db.QueryRowContext(ctx, `UPDATE devices d SET active_group_id=$2,last_seen_at=NOW()
+FROM memberships m JOIN groups g ON g.id=m.group_id
+WHERE d.mac=$1 AND m.device_id=d.id AND m.group_id=$2
+RETURNING g.id::text,g.name,g.owner_device_id::text,g.invite_code,g.next_seq,g.created_at`, mac, groupID).
+		Scan(&group.ID, &group.Name, &group.OwnerID, &group.InviteCode, &group.NextSeq, &group.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Group{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Group{}, fmt.Errorf("switch active group: %w", err)
+	}
+	return group, nil
+}
+
+// SwitchActiveGroupByName changes focus using an exact, case-insensitive name.
+// Fuzzy and ambiguous name resolution belongs to the group resolution layer.
+func (p *Postgres) SwitchActiveGroupByName(ctx context.Context, mac, name string) (model.Group, error) {
+	var groupID string
+	err := p.db.QueryRowContext(ctx, `SELECT g.id::text FROM groups g
+JOIN memberships m ON m.group_id=g.id JOIN devices d ON d.id=m.device_id
+WHERE d.mac=$1 AND LOWER(TRIM(g.name))=LOWER(TRIM($2))`, mac, name).Scan(&groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Group{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Group{}, fmt.Errorf("find group by name: %w", err)
+	}
+	return p.SwitchActiveGroup(ctx, mac, groupID)
 }
 
 func (p *Postgres) CreateGroup(ctx context.Context, ownerMAC, name, inviteCode string) (model.Group, error) {
@@ -99,6 +236,9 @@ RETURNING id::text,name,owner_device_id::text,invite_code,next_seq,created_at`, 
 	if _, err = tx.ExecContext(ctx, `INSERT INTO memberships(group_id,device_id,alias) VALUES($1,$2,$3)`, g.ID, ownerID, name); err != nil {
 		return model.Group{}, fmt.Errorf("add owner membership: %w", err)
 	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id) VALUES($1,$2)`, ownerID, g.ID); err != nil {
+		return model.Group{}, fmt.Errorf("initialize owner acknowledgement: %w", err)
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE devices SET active_group_id=$1 WHERE id=$2`, g.ID, ownerID); err != nil {
 		return model.Group{}, fmt.Errorf("set active group: %w", err)
 	}
@@ -122,6 +262,9 @@ RETURNING group_id::text,device_id::text,alias,joined_at`, groupID, mac, alias).
 	}
 	if err != nil {
 		return model.Membership{}, fmt.Errorf("add member: %w", err)
+	}
+	if _, err = p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, m.DeviceID, groupID); err != nil {
+		return model.Membership{}, fmt.Errorf("initialize member acknowledgement: %w", err)
 	}
 	if _, err = p.db.ExecContext(ctx, `UPDATE devices SET active_group_id=$1 WHERE id=$2`, groupID, m.DeviceID); err != nil {
 		return model.Membership{}, fmt.Errorf("set member focus: %w", err)

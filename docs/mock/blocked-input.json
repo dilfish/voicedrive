@@ -1,0 +1,6 @@
+{"version":1,"steps":[
+  {"op":"input","text":"建个群吧"},
+  {"op":"quiet","timeout_ms":100},
+  {"op":"advance","advance_ms":10000},
+  {"op":"disconnect"}
+]}

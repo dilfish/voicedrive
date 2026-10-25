@@ -5,10 +5,12 @@
 ## 运行
 
 ```sh
-go run ./cmd/linx-mock -script docs/mock/handshake.json -listen 127.0.0.1:18080 -mac TEST-01 -report report.json
+go run ./cmd/linx-scriptmock -script docs/mock/handshake.json -listen 127.0.0.1:18080 -mac TEST-01 -report report.json
 ```
 
 让设备连接 `ws://127.0.0.1:18080/?mac=TEST-01`。每次新建报告路径，避免覆盖证据。默认总超时 5 秒，可用 `-timeout 30s` 覆盖，上限 4 分钟。`make test-mock` 离线执行 race 测试，无麦克风、凭证或真实灵矽需求。默认 `make` 仍为构建。
+
+本入口原名 `cmd/linx-mock`；合入 main 的 #30 后，为避免覆盖既有功能改名为 `cmd/linx-scriptmock`。原 `cmd/linx-mock`、`internal/mock` 和 `scripts/` 保持 main 的实现，使用方式见 [scripts/README.md](../../scripts/README.md)。两套 DSL、MCP 信封、MAC 传递方式及报告格式不同，不可混用；后续设备适配需要显式选定协议。本次只做共存兼容，不宣称完成协议统一。
 
 单实例只接受一台设备的一条连接；多设备测试启动不同端口/MAC/报告路径的实例，不共享状态。默认仅绑定回环地址。退出时关闭连接与 HTTP 服务，报告权限 0600。不要输入凭证，记录器会完整记录所有应用层上行帧；录制文件不要直接公开。
 

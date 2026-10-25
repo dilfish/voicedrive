@@ -1,4 +1,3 @@
-// linx-mock runs one scripted local platform session without credentials or audio hardware.
 package main
 
 import (
@@ -6,117 +5,84 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
+	"sync/atomic"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/scriptmock"
+	"github.com/dilfish/voicedrive/internal/mock"
 )
 
-func run(ctx context.Context, args []string, output io.Writer) int {
-	f := flag.NewFlagSet("linx-mock", flag.ContinueOnError)
-	f.SetOutput(output)
-	path := f.String("script", "", "JSON script path (required)")
-	address := f.String("listen", "127.0.0.1:18080", "loopback WebSocket listen address")
-	mac := f.String("mac", "", "override expected MAC")
-	report := f.String("report", "report.json", "new report file")
-	adapterURL := f.String("adapter", "", "optional local device test-ingress HTTP URL")
-	timeout := f.Duration("timeout", 0, "override script total timeout (max 4m)")
-	if err := f.Parse(args); err != nil {
-		return 2
-	}
-	if *path == "" || f.NArg() != 0 || *timeout < 0 || *timeout > 4*time.Minute {
-		fmt.Fprintln(output, "invalid flags: -script required; timeout must be 0..4m")
-		return 2
-	}
-	host, _, err := net.SplitHostPort(*address)
-	if err != nil {
-		fmt.Fprintln(output, "listen address:", err)
-		return 2
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		fmt.Fprintln(output, "listen requires literal loopback IP")
-		return 2
-	}
-	input, err := os.Open(*path)
-	if err != nil {
-		fmt.Fprintln(output, "open script:", err)
-		return 2
-	}
-	s, parseErr := scriptmock.Parse(input)
-	closeErr := input.Close()
-	if parseErr != nil || closeErr != nil {
-		fmt.Fprintln(output, "read script:", parseErr, closeErr)
-		return 2
-	}
-	if *mac != "" {
-		s.MAC = *mac
-	}
-	if *timeout > 0 {
-		s.TimeoutMS = int((*timeout + time.Millisecond - 1) / time.Millisecond)
-	}
-	var adapter scriptmock.Adapter
-	if *adapterURL != "" {
-		a, err := scriptmock.NewHTTPAdapter(*adapterURL)
-		if err != nil {
-			fmt.Fprintln(output, err)
-			return 2
-		}
-		adapter = a
-	}
-	m, err := scriptmock.New(s, adapter)
-	if err != nil {
-		fmt.Fprintln(output, err)
-		return 2
-	}
-	file, err := os.OpenFile(*report, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		fmt.Fprintln(output, "create report:", err)
-		return 2
-	}
-	listener, err := net.Listen("tcp", *address)
-	if err != nil {
-		fmt.Fprintln(output, "listen:", err)
-		if e := file.Close(); e != nil {
-			fmt.Fprintln(output, "close report:", e)
-		}
-		return 2
-	}
-	server := &http.Server{Handler: m, ReadHeaderTimeout: time.Second}
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Serve(listener) }()
-	fmt.Fprintln(output, "mock listening:", listener.Addr().String())
-	r := m.Run(ctx)
-	if err := server.Close(); err != nil {
-		r.Passed = false
-		r.Error += "; close server: " + err.Error()
-	}
-	if err := <-serveDone; err != nil && err != http.ErrServerClosed {
-		r.Passed = false
-		r.Error += "; serve: " + err.Error()
-	}
-	encodeErr := json.NewEncoder(file).Encode(r)
-	closeErr = file.Close()
-	if encodeErr != nil || closeErr != nil {
-		fmt.Fprintln(output, "write report:", encodeErr, closeErr)
-		return 2
-	}
-	if !r.Passed {
-		fmt.Fprintln(output, r.Error)
-		return 1
-	}
-	fmt.Fprintln(output, "script passed; report:", *report)
-	return 0
-}
-
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stderr)
-	stop()
-	os.Exit(code)
+	baseURL := flag.String("server", "http://localhost:8080", "voicedrive HTTP endpoint")
+	scriptPath := flag.String("script", "", "JSON script path")
+	reportPath := flag.String("report", "report.json", "report output path")
+	listen := flag.String("listen", "", "serve one platform WebSocket session, e.g. 127.0.0.1:9090")
+	mac := flag.String("mac", "", "required X-VD-MAC for WebSocket mode (optional)")
+	timeout := flag.Duration("timeout", time.Minute, "maximum scenario duration including connection wait")
+	flag.Parse()
+	if *scriptPath == "" {
+		log.Fatal("-script is required")
+	}
+	script, err := mock.Load(*scriptPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	ctx, deadlineCancel := context.WithTimeout(ctx, *timeout)
+	defer deadlineCancel()
+	var report mock.Report
+	if *listen == "" {
+		report = mock.Run(ctx, *baseURL, script)
+	} else {
+		reports := make(chan mock.Report, 1)
+		var accepted atomic.Bool
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/ws/", func(w http.ResponseWriter, r *http.Request) {
+			if *mac != "" && r.Header.Get("X-VD-MAC") != *mac {
+				http.Error(w, "unexpected MAC", http.StatusForbidden)
+				return
+			}
+			if !accepted.CompareAndSwap(false, true) {
+				http.Error(w, "session already started", http.StatusConflict)
+				return
+			}
+			conn, err := mock.Upgrade(w, r)
+			if err != nil {
+				accepted.Store(false)
+				return
+			}
+			reports <- mock.ServeSession(ctx, conn, script)
+		})
+		listener, err := net.Listen("tcp", *listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+		server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second}
+		go func() { _ = server.Serve(listener) }()
+		fmt.Printf("mock listening on ws://%s/v1/ws/\n", listener.Addr())
+		select {
+		case report = <-reports:
+		case <-ctx.Done():
+			report = mock.Report{Name: script.Name, Results: []mock.Result{{Name: "session", Error: ctx.Err().Error()}}}
+		}
+		_ = server.Close()
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(*reportPath, append(data, '\n'), 0644); err != nil {
+		log.Fatal(err)
+	}
+	for _, result := range report.Results {
+		fmt.Printf("%s: %v %s\n", result.Name, result.Passed, result.Error)
+	}
+	if !report.Passed {
+		os.Exit(1)
+	}
 }

@@ -3,9 +3,6 @@ DATABASE_URL ?= postgres://voicedrive:voicedrive@localhost:5432/voicedrive?sslmo
 
 .PHONY: build test db db-down run test-mock
 
-test-mock:
-	go test -race -timeout 60s ./internal/scriptmock ./cmd/linx-mock
-
 build:
 	go build ./...
 
@@ -20,3 +17,6 @@ db-down:
 
 run:
 	DATABASE_URL=$(DATABASE_URL) go run ./cmd/server
+
+test-mock:
+	go test -race -count=1 -timeout=60s ./internal/mock ./cmd/linx-mock ./internal/scriptmock ./cmd/linx-scriptmock

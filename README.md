@@ -1,5 +1,9 @@
 # voicedrive
 
+## V2 指令接入与演示预检（#12）
+
+基于 `mvp` 的真实灵汐接口提供独立指令入口 `cmd/voicedrive-command`，不替换现有设备控制面。配置、演示步骤和待验边界见 [docs/demo](docs/demo/README.md)。`make test-demo` 离线验证指令执行链路及编排框架；`make demo` 在 V2 原声媒体等依赖缺失时明确报告阻塞，不以旧上传链路代替。
+
 ## V2 剧本化 mock（#11）
 
 JSON 剧本、独立 WebSocket mock、输入适配接口和验收边界见 [docs/mock](docs/mock/README.md)。运行 `make test-mock` 可离线验证框架；真实设备指令及确认链路仍需依赖组件就绪后联调。

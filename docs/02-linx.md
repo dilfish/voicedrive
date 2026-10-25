@@ -60,7 +60,7 @@ flowchart TB
 
 - `audio.Capture`：独立 goroutine 泵，PCM 块经 channel 分发给**两个消费者**——提醒词检测器（§5）与（命中后）编码上行；不命中则转发给对讲通道。
 - `audio.Playback`：单一输出流。**两路来源在此汇合**：灵犀 TTS 帧、对讲混音输出（01-voice-group §3.3）。合成音与对讲原声**逐样本相加播放**（不做打断），保证群内对讲不被系统播报切掉。
-- 无麦克风降级（product-v2 §2.1）：终端文本输入以提醒词开头 → 视作 ASR 结果直接进指令通道（跳过采音）；不以提醒词开头 → 提示"对讲需音频，请用麦克风或注入文件"。`--inject file.opus` 注入音频等同一次开口。
+- 无麦克风降级（product-v2 §2.1）：终端文本输入以提醒词开头 → 视作 ASR 结果直接进指令通道（跳过采音）；不以提醒词开头 → 提示"对讲需音频，请用麦克风或注入文件"。`--inject file.wav`（16k/mono/s16 WAV，取 data chunk 按 20ms/640B 帧真实节奏上行）与 `--mic N`（ffmpeg avfoundation 采集，实时上行）都等同一次开口：直通进指令会话（§1 分流豁免），发完补 listen stop。
 - 对讲通道（通道 A）的帧封装、talk 会话边界（VAD 起止/预滚/尾静默/120s 上限）、下行流 demux 与切群在途流处理见 `03-voice-protocol.md`。
 
 ---
@@ -233,7 +233,7 @@ stateDiagram-v2
 ## 8. Go 包结构
 
 ```
-cmd/voicedrive-device/        # 模拟器入口：--mac --alias --wake-word --server --inject；终端 UI（滚动区+状态区）
+cmd/voicedrive-device/        # 模拟器入口：--mac --alias --wake-word --server --inject/--mic；终端 UI（滚动区+状态区）
 internal/audio/               # Capture/Playback 抽象 + malgo 实现
 internal/opus/                # libopus 编解码（Encode(960 samples)→Opus 帧 / Decode 逆）
 internal/vad/                 # VAD 分段（onset/offset 事件流）：驱动提醒词检测窗口（§1）与 talk 会话边界（03 §5.1）

@@ -25,17 +25,19 @@ const userAgent = "voicedrive-device/0.1.0"
 
 // config 是命令行配置（02 §3/§8）。
 type config struct {
-	MAC      string
-	Alias    string
-	WakeWord string
-	Server   string
-	LinxURL  string
-	OTAURL   string
-	Token    string
-	Inject   string
+	MAC         string
+	Alias       string
+	WakeWord    string
+	Server      string
+	LinxURL     string
+	OTAURL      string
+	Token       string
+	Inject      string
+	Mic         string
+	MicDuration time.Duration
 }
 
-// parseFlags 解析参数；仅 --mac 必填。
+// parseFlags 解析参数；仅 --mac 必填，--inject 与 --mic 互斥。
 func parseFlags(args []string) (config, error) {
 	fs := flag.NewFlagSet("voicedrive-device", flag.ContinueOnError)
 	mac := fs.String("mac", "", "设备 MAC 地址（必填，唯一身份标识）")
@@ -45,22 +47,29 @@ func parseFlags(args []string) (config, error) {
 	linxURL := fs.String("lingx-url", "ws://xrobo-io.qiniuapi.com/v1/ws/", "灵犀 WS 端点")
 	otaURL := fs.String("ota", "https://xrobo.qiniuapi.com/v1/ota/", "灵犀 OTA 上报端点（换激活码/token）")
 	token := fs.String("token", os.Getenv("LINX_TOKEN"), "WS token，留空自动走 OTA 引导")
-	inject := fs.String("inject", "", "注入音频文件（等同一次开口，V0 占位打点）")
+	inject := fs.String("inject", "", "注入 WAV 音频文件（16k/mono/s16，等同一次开口）")
+	mic := fs.String("mic", "", "用电脑麦克风采集上行（ffmpeg avfoundation 设备序号，如 0），需装 ffmpeg")
+	micDur := fs.Duration("mic-duration", 6*time.Second, "--mic 采集时长")
 	if err := fs.Parse(args); err != nil {
 		return config{}, fmt.Errorf("解析参数: %w", err)
 	}
 	if *mac == "" {
 		return config{}, fmt.Errorf("参数校验: --mac 必填")
 	}
+	if *inject != "" && *mic != "" {
+		return config{}, fmt.Errorf("参数校验: --inject 与 --mic 互斥，二选一")
+	}
 	return config{
-		MAC:      *mac,
-		Alias:    *alias,
-		WakeWord: *wakeWord,
-		Server:   *server,
-		LinxURL:  *linxURL,
-		OTAURL:   *otaURL,
-		Token:    *token,
-		Inject:   *inject,
+		MAC:         *mac,
+		Alias:       *alias,
+		WakeWord:    *wakeWord,
+		Server:      *server,
+		LinxURL:     *linxURL,
+		OTAURL:      *otaURL,
+		Token:       *token,
+		Inject:      *inject,
+		Mic:         *mic,
+		MicDuration: *micDur,
 	}, nil
 }
 
@@ -130,9 +139,25 @@ func run(cfg config) error {
 	go statusLoop(ctx, client, out)
 
 	fmt.Fprintf(out, "voicedrive-device mac=%s alias=%s wake-word=%s server=%s linx=%s\n", cfg.MAC, cfg.Alias, cfg.WakeWord, cfg.Server, linxURL)
-	if cfg.Inject != "" {
-		// 02 §3：注入音频等同一次开口；待 03 对讲/采集通道落地后接真实文件读取。
-		logger.Infof("音频注入占位：%s（等同一次开口）", cfg.Inject)
+	if cfg.Inject != "" || cfg.Mic != "" {
+		// 注入/麦克风等同一次开口（02 §3）：会话就绪后上行，失败只报错不影响指令循环。
+		go func() {
+			if err := waitSession(ctx, client); err != nil {
+				logger.Warnf("音频上行: %v", err)
+				return
+			}
+			var err error
+			if cfg.Inject != "" {
+				err = uplinkWAV(ctx, client, cfg.Inject)
+			} else {
+				err = uplinkMic(ctx, client, cfg.Mic, cfg.MicDuration, os.Stderr, logger)
+			}
+			if err != nil {
+				logger.Errorf("音频上行: %v", err)
+				return
+			}
+			logger.Infof("音频上行结束")
+		}()
 	}
 
 	sc := bufio.NewScanner(os.Stdin)

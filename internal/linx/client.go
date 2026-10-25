@@ -328,16 +328,27 @@ func (c *Client) SendText(b []byte) {
 // SendDetect 把一段文本伪装成已识别语音上行（listen.detect，等价"用户说了这句话"）。
 // 尚未收到平台 hello（无 session_id）时丢弃并告警：detect 必须归属某个会话。
 func (c *Client) SendDetect(text string) {
+	c.sendListen(listenFrame{Type: "listen", State: "detect", Text: text})
+}
+
+// SendListenStop 结束一次音频上行会话（listen stop，对齐 linx-emu：音频发完补此帧）。
+func (c *Client) SendListenStop() {
+	c.sendListen(listenFrame{Type: "listen", State: "stop"})
+}
+
+// sendListen 统一发送 listen 帧：无 session_id 时丢弃并告警（帧必须归属某个会话）。
+func (c *Client) sendListen(f listenFrame) {
 	c.sessMu.Lock()
 	sid := c.sessionID
 	c.sessMu.Unlock()
 	if sid == "" {
-		c.logger.Warnf("linx: 无 session_id，丢弃 detect 文本 %q", text)
+		c.logger.Warnf("linx: 无 session_id，丢弃 listen %s 帧", f.State)
 		return
 	}
-	b, err := json.Marshal(listenFrame{Type: "listen", State: "detect", Text: text, SessionID: sid})
+	f.SessionID = sid
+	b, err := json.Marshal(f)
 	if err != nil {
-		c.logger.Errorf("linx: 序列化 detect 失败: %v", err)
+		c.logger.Errorf("linx: 序列化 listen %s 失败: %v", f.State, err)
 		return
 	}
 	c.SendText(b)

@@ -127,6 +127,22 @@ func TestClient_SendDetect(t *testing.T) {
 	}, detect)
 }
 
+// SendListenStop 结束一次上行会话（对齐 linx-emu：音频发完补 listen stop），须带 session_id。
+func TestClient_SendListenStop(t *testing.T) {
+	srv := linxtest.New(t)
+	c, _ := newClient(t, srv.URL(), nil)
+	srv.WaitForTexts(t, 2) // hello + listen start
+	c.SendListenStop()
+	texts := srv.WaitForTexts(t, 3)
+	var stop map[string]any
+	require.NoError(t, json.Unmarshal([]byte(texts[2]), &stop))
+	require.Equal(t, map[string]any{
+		"type":       "listen",
+		"state":      "stop",
+		"session_id": "sid-1",
+	}, stop)
+}
+
 func TestClient_MCPRoundtrip(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), func(payload []byte) []byte {

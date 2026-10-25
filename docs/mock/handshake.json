@@ -1,0 +1,10 @@
+{"version":1,"timeout_ms":10000,"steps":[
+  {"op":"expect","frame":{"type":"hello","version":1,"features":{"mcp":true},"transport":"websocket","audio_params":{"sample_rate":16000,"channels":1,"format":"opus","frame_ms":60}}},
+  {"op":"send","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"method":"initialize"}}},
+  {"op":"expect","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":true},"serverInfo":{"name":"voicedrive-device","version":"0.1.0"}}}}},
+  {"op":"send","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":2,"method":"tools/list"}}},
+  {"op":"expect","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}}},
+  {"op":"send","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"group.create","arguments":{"name":"夜班组","passcode":"12345"}}}}},
+  {"op":"expect","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":3,"result":{"isError":false,"content":[{"type":"text","text":"群建好了，口令12345"}]}}}},
+  {"op":"disconnect"}
+]}

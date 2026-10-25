@@ -1,4 +1,5 @@
 DATABASE_URL ?= postgres://voicedrive:voicedrive@localhost:5432/voicedrive?sslmode=disable
+.DEFAULT_GOAL := build
 
 .PHONY: build test db db-down run test-mock demo demo-check test-demo fmt-check
 
@@ -21,7 +22,7 @@ run:
 	DATABASE_URL=$(DATABASE_URL) go run ./cmd/server
 
 test-mock:
-	go test -count=1 -timeout=60s ./internal/mock ./cmd/linx-mock
+	go test -race -count=1 -timeout=60s ./internal/mock ./cmd/linx-mock ./internal/scriptmock ./cmd/linx-scriptmock
 
 demo:
 	go run ./cmd/voicedrive-demo $(DEMO_ARGS)

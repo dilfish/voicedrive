@@ -87,6 +87,21 @@ FROM devices WHERE mac=$1`, mac).
 	return d, nil
 }
 
+// ActiveGroup returns the device's current focus group.
+func (p *Postgres) ActiveGroup(ctx context.Context, deviceID string) (model.Group, error) {
+	var group model.Group
+	err := p.db.QueryRowContext(ctx, `SELECT g.id::text,g.name,g.owner_device_id::text,g.invite_code,g.next_seq,g.created_at
+FROM devices d JOIN groups g ON g.id=d.active_group_id WHERE d.id=$1`, deviceID).
+		Scan(&group.ID, &group.Name, &group.OwnerID, &group.InviteCode, &group.NextSeq, &group.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Group{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Group{}, fmt.Errorf("find active group: %w", err)
+	}
+	return group, nil
+}
+
 // PendingMessages returns at most limit messages for the device's active group.
 func (p *Postgres) PendingMessages(ctx context.Context, deviceID string, limit int) ([]model.DeviceMessage, error) {
 	if limit <= 0 {

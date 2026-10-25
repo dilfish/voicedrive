@@ -23,6 +23,10 @@ func newClient(t *testing.T, url string, onMCP func([]byte) []byte) (*linx.Clien
 		BackoffBase: 5 * time.Millisecond,
 		BackoffMax:  20 * time.Millisecond,
 		OutboxSize:  64,
+		Token:       "tk-test",
+		DeviceID:    "AA:BB:CC:DD:EE:FF",
+		ClientID:    "cid-test",
+		UserAgent:   "vd-test/0.1",
 	}, buf, onMCP, logx.NewNop())
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -52,6 +56,19 @@ func TestClient_ZeroValueConfigOutboxBuffered(t *testing.T) {
 	}
 }
 
+// 握手必须带 linx-emu 对齐的 5 个头（对齐 cmd/linx-emu 参考实现）。
+func TestClient_DialHeaders(t *testing.T) {
+	srv := linxtest.New(t)
+	_, _ = newClient(t, srv.URL(), nil)
+	require.Eventually(t, func() bool { return len(srv.HandshakeHeaders()) >= 1 }, 2*time.Second, 2*time.Millisecond)
+	h := srv.HandshakeHeaders()[0]
+	require.Equal(t, "Bearer tk-test", h.Get("Authorization"))
+	require.Equal(t, "1", h.Get("Protocol-Version"))
+	require.Equal(t, "AA:BB:CC:DD:EE:FF", h.Get("Device-Id"))
+	require.Equal(t, "cid-test", h.Get("Client-Id"))
+	require.Equal(t, "vd-test/0.1", h.Get("User-Agent"))
+}
+
 func TestClient_Hello(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), nil)
@@ -64,12 +81,50 @@ func TestClient_Hello(t *testing.T) {
 		"features":  map[string]any{"mcp": true},
 		"transport": "websocket",
 		"audio_params": map[string]any{
-			"sample_rate": float64(16000),
-			"channels":    float64(1),
-			"format":      "opus",
-			"frame_ms":    float64(60),
+			"format":               "pcm",
+			"sample_rate":          float64(16000),
+			"channels":             float64(1),
+			"bit_depth":            float64(16),
+			"endianness":           "little",
+			"frame_duration":       float64(20),
+			"frame_size":           float64(320),
+			"sample_format":        "signed_int16",
+			"play_buffer_duration": float64(300),
 		},
 	}, got)
+}
+
+// 平台回 hello(session_id) 后，客户端应自动发 listen start（manual 模式）。
+func TestClient_ServerHelloSession(t *testing.T) {
+	srv := linxtest.New(t)
+	c, _ := newClient(t, srv.URL(), nil)
+	texts := srv.WaitForTexts(t, 2) // 设备 hello + listen start
+	var listenStart map[string]any
+	require.NoError(t, json.Unmarshal([]byte(texts[1]), &listenStart))
+	require.Equal(t, map[string]any{
+		"type":       "listen",
+		"state":      "start",
+		"mode":       "manual",
+		"session_id": "sid-1",
+	}, listenStart)
+	require.Equal(t, "sid-1", c.SessionID())
+}
+
+// SendDetect 把文本伪装成已识别语音上行（listen.detect），须带当前 session_id。
+func TestClient_SendDetect(t *testing.T) {
+	srv := linxtest.New(t)
+	c, _ := newClient(t, srv.URL(), nil)
+	srv.WaitForTexts(t, 2) // hello + listen start，此时已持有 session
+	c.SendDetect("今天天气怎么样")
+	texts := srv.WaitForTexts(t, 3)
+	var detect map[string]any
+	require.NoError(t, json.Unmarshal([]byte(texts[2]), &detect))
+	require.Equal(t, map[string]any{
+		"type":       "listen",
+		"state":      "detect",
+		"text":       "今天天气怎么样",
+		"session_id": "sid-1",
+	}, detect)
 }
 
 func TestClient_MCPRoundtrip(t *testing.T) {
@@ -79,11 +134,11 @@ func TestClient_MCPRoundtrip(t *testing.T) {
 		require.NoError(t, json.Unmarshal(payload, &req))
 		return []byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
 	})
-	srv.WaitForTexts(t, 1)
+	srv.WaitForTexts(t, 2) // hello + listen start
 	require.NoError(t, srv.PushText(`{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}`))
-	texts := srv.WaitForTexts(t, 2)
+	texts := srv.WaitForTexts(t, 3)
 	var resp map[string]any
-	require.NoError(t, json.Unmarshal([]byte(texts[1]), &resp))
+	require.NoError(t, json.Unmarshal([]byte(texts[2]), &resp))
 	require.Equal(t, "mcp", resp["type"])
 	payload := resp["payload"].(map[string]any)
 	require.Equal(t, "2.0", payload["jsonrpc"])
@@ -120,11 +175,11 @@ func TestClient_LifecycleDrivesState(t *testing.T) {
 func TestClient_ReconnectAndResendHello(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), nil)
-	srv.WaitForTexts(t, 1)
+	srv.WaitForTexts(t, 2) // 首连 hello + listen start
 	srv.KillConnections()
-	texts := srv.WaitForTexts(t, 2)
+	texts := srv.WaitForTexts(t, 4) // 重连后重新 hello + listen start
 	var hello map[string]any
-	require.NoError(t, json.Unmarshal([]byte(texts[1]), &hello))
+	require.NoError(t, json.Unmarshal([]byte(texts[2]), &hello))
 	require.Equal(t, "hello", hello["type"])
 }
 
@@ -133,11 +188,11 @@ func TestClient_ReconnectAndResendHello(t *testing.T) {
 func TestClient_WritePumpExitsOnServerClose(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), nil)
-	srv.WaitForTexts(t, 1)
+	srv.WaitForTexts(t, 2)
 	srv.KillConnections()
-	srv.WaitForTexts(t, 2) // 第一次重连成功
+	srv.WaitForTexts(t, 4) // 第一次重连成功
 	srv.KillConnections()
-	srv.WaitForTexts(t, 3) // 第二次重连成功
+	srv.WaitForTexts(t, 6) // 第二次重连成功
 
 	// 任一时刻只应存在当前会话的 1 个写泵；泄漏的旧泵同样停在该 select 上。
 	require.Eventually(t, func() bool {

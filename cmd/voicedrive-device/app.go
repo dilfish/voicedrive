@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -24,27 +23,20 @@ const ExpiredPhrase = "先不管了，需要再说"
 const TalkPrompt = "对讲需音频，请用麦克风或注入文件"
 
 // CommandSink 把提醒词命中后的剩余文本作为 ASR 等价结果送入指令会话。
-// 文本上行报文格式待平台联调（02 §11-2），经此接口隔离；fake 环境可断言。
+// 经此接口隔离 WS 上行细节；fake 环境可断言。
 type CommandSink interface {
 	SendCommand(text string)
 }
 
 // LinxCommandSink 是 CommandSink 的灵犀 WS 实现：
-// 以占位信封 type:"asr_text" 文本帧上行（字段名 §11 联调后固化）。
+// 以 listen.detect 文本帧上行（对齐 linx-emu：等价"用户说了这句话"，带 session_id）。
 type LinxCommandSink struct {
 	Client *linx.Client
 }
 
 // SendCommand 实现 CommandSink。
 func (s *LinxCommandSink) SendCommand(text string) {
-	b, err := json.Marshal(struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}{"asr_text", text})
-	if err != nil {
-		return // 静态两字段 marshal 不可能失败
-	}
-	s.Client.SendText(b)
+	s.Client.SendDetect(text)
 }
 
 // App 承载终端文本分流（02 §3）与确认重放；HandleLine 仅由输入循环单线程

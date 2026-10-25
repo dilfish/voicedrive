@@ -4,6 +4,8 @@
 package linxtest
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,11 +23,15 @@ type Frame struct {
 }
 
 // Server 是 fake 灵犀 server；并发安全。
+// 行为对齐真实平台：收到设备 hello 后回 {"type":"hello","session_id":"sid-N"}
+// （N 按连接序递增），供客户端握手/会话测试断言。
 type Server struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	conns  map[*websocket.Conn]struct{}
-	frames []Frame
+	srv     *httptest.Server
+	mu      sync.Mutex
+	conns   map[*websocket.Conn]struct{}
+	frames  []Frame
+	hsHdrs  []http.Header // 每条连接的握手请求头快照
+	nextSid int
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -51,6 +57,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.conns[ws] = struct{}{}
+	s.hsHdrs = append(s.hsHdrs, r.Header.Clone())
+	s.nextSid++
+	sid := fmt.Sprintf("sid-%d", s.nextSid)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -66,7 +75,31 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.frames = append(s.frames, Frame{Binary: mt == websocket.BinaryMessage, Text: string(data)})
 		s.mu.Unlock()
+		if mt == websocket.TextMessage && isHello(data) {
+			_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			reply, err := json.Marshal(map[string]any{"type": "hello", "session_id": sid})
+			if err != nil {
+				return
+			}
+			if err := ws.WriteMessage(websocket.TextMessage, reply); err != nil {
+				return
+			}
+		}
 	}
+}
+
+func isHello(data []byte) bool {
+	var m struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(data, &m) == nil && m.Type == "hello"
+}
+
+// HandshakeHeaders 返回每条连接握手请求头的快照（含重连），顺序与连接建立一致。
+func (s *Server) HandshakeHeaders() []http.Header {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]http.Header(nil), s.hsHdrs...)
 }
 
 // Frames 返回已录制帧的快照。

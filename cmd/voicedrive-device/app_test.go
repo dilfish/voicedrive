@@ -132,7 +132,7 @@ func newHarness(t *testing.T, next func(c vdCall) groupclient.Result) (*App, *li
 	go func() { _ = client.Run(ctx) }()
 
 	app = NewApp("小牛", cf, reg, &LinxCommandSink{Client: client}, out, logger)
-	lxs.WaitForTexts(t, 1) // hello 已上行，连接就绪
+	lxs.WaitForTexts(t, 2) // hello + listen start：平台已回 session_id，detect 才不会丢
 	return app, lxs, vd, out
 }
 
@@ -175,29 +175,45 @@ func textOf(t *testing.T, resp map[string]any) string {
 func TestParseFlags(t *testing.T) {
 	tests := []struct {
 		name    string
+		envTok  string
 		args    []string
 		want    config
 		wantErr string
 	}{
 		{
-			name: "默认值",
-			args: []string{"--mac", "AA:BB"},
-			want: config{MAC: "AA:BB", WakeWord: "小牛", LinxURL: "ws://xrobo-io.qiniuapi.com/v1/ws/"},
+			name:   "默认值",
+			envTok: "",
+			args:   []string{"--mac", "AA:BB"},
+			want: config{MAC: "AA:BB", WakeWord: "小牛",
+				LinxURL: "ws://xrobo-io.qiniuapi.com/v1/ws/",
+				OTAURL:  "https://xrobo.qiniuapi.com/v1/ota/"},
 		},
 		{
 			name:    "缺 mac 必填",
+			envTok:  "",
 			args:    []string{"--server", "http://x"},
 			wantErr: "--mac",
 		},
 		{
+			name:   "token 继承环境变量",
+			envTok: "env-tk",
+			args:   []string{"--mac", "AA:BB"},
+			want: config{MAC: "AA:BB", WakeWord: "小牛", Token: "env-tk",
+				LinxURL: "ws://xrobo-io.qiniuapi.com/v1/ws/",
+				OTAURL:  "https://xrobo.qiniuapi.com/v1/ota/"},
+		},
+		{
 			name: "全量参数",
 			args: []string{"--mac", "AA:BB", "--alias", "床头机", "--wake-word", "小七",
-				"--server", "http://vd", "--lingx-url", "ws://lx", "--inject", "a.opus"},
-			want: config{MAC: "AA:BB", Alias: "床头机", WakeWord: "小七", Server: "http://vd", LinxURL: "ws://lx", Inject: "a.opus"},
+				"--server", "http://vd", "--lingx-url", "ws://lx", "--ota", "https://ota/x",
+				"--token", "tk-1", "--inject", "a.opus"},
+			want: config{MAC: "AA:BB", Alias: "床头机", WakeWord: "小七", Server: "http://vd",
+				LinxURL: "ws://lx", OTAURL: "https://ota/x", Token: "tk-1", Inject: "a.opus"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("LINX_TOKEN", tt.envTok) // flag 默认值取自该环境变量，须钉死保证用例确定性
 			got, err := parseFlags(tt.args)
 			if tt.wantErr != "" {
 				require.Error(t, err)
@@ -208,6 +224,71 @@ func TestParseFlags(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// --- OTA 引导（对齐 linx-emu 连接流程） ---
+
+// otaScript 是脚本化 OTA 应答器：按请求次数依次回放 script 中的响应体。
+func otaScript(script []string, calls *atomic.Int32) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := ""
+		if i := int(calls.Add(1)) - 1; i < len(script) {
+			body = script[i]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+}
+
+func TestBootstrapToken(t *testing.T) {
+	var calls atomic.Int32
+	hs := httptest.NewServer(otaScript([]string{
+		`{"activation":{"code":"483209","message":"去控制台绑定"}}`,
+		`{"activation":{"code":"483209","message":"去控制台绑定"}}`,
+		`{"websocket":{"url":"wss://ov.example/v1/ws/","token":"tk-1"}}`,
+	}, &calls))
+	t.Cleanup(hs.Close)
+	out := &syncBuf{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	token, wsURL, err := bootstrapToken(ctx, hs.URL, "AA:BB", "cid-1", userAgent, time.Millisecond, out, logx.NewNop())
+
+	require.NoError(t, err)
+	require.Equal(t, "tk-1", token)
+	require.Equal(t, "wss://ov.example/v1/ws/", wsURL)
+	require.Equal(t, int32(3), calls.Load())
+	require.Equal(t, 1, strings.Count(out.String(), "483209"), "相同激活码只打印一次")
+}
+
+// OTA 瞬时错误不致命：告警后继续轮询直至绑定。
+func TestBootstrapToken_RetriesTransientError(t *testing.T) {
+	var calls atomic.Int32
+	hs := httptest.NewServer(otaScript([]string{
+		`{bad json`,
+		`{"websocket":{"url":"","token":"tk-2"}}`,
+	}, &calls))
+	t.Cleanup(hs.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	token, wsURL, err := bootstrapToken(ctx, hs.URL, "AA:BB", "cid-1", userAgent, time.Millisecond, &syncBuf{}, logx.NewNop())
+
+	require.NoError(t, err)
+	require.Equal(t, "tk-2", token)
+	require.Empty(t, wsURL, "OTA 未回 ws 地址时保持默认端点")
+}
+
+func TestBootstrapToken_CtxCancel(t *testing.T) {
+	var calls atomic.Int32
+	hs := httptest.NewServer(otaScript([]string{`{"activation":{"code":"111111","message":"x"}}`}, &calls))
+	t.Cleanup(hs.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := bootstrapToken(ctx, hs.URL, "AA:BB", "cid-1", userAgent, time.Millisecond, &syncBuf{}, logx.NewNop())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OTA 引导")
 }
 
 // --- HandleLine 分流（单元：fake sink，无灵犀连接） ---
@@ -396,7 +477,8 @@ func TestRegisterGroupTools_SwitchPreSwitchHook(t *testing.T) {
 
 // --- 集成：硬边界 / 端到端 / clarify 回路 ---
 
-// 硬边界（02 §10 专项）：无提醒词输入必须零上行、零工具调用。
+// 硬边界（02 §10 专项）：无提醒词输入必须零业务上行、零工具调用。
+// hello 与 listen start 属协议固有帧，不算业务上行。
 func TestHardBoundary_NoWakeNoUplink(t *testing.T) {
 	app, lxs, vd, _ := newHarness(t, func(vdCall) groupclient.Result {
 		t.Error("无提醒词输入不得触发任何工具调用")
@@ -405,25 +487,28 @@ func TestHardBoundary_NoWakeNoUplink(t *testing.T) {
 	app.HandleLine("建个群吧")
 
 	time.Sleep(50 * time.Millisecond)
-	texts := lxs.WaitForTexts(t, 1)
-	require.Len(t, texts, 1, "只应有 hello，不 得有任何后续上行")
-	var hello map[string]any
+	texts := lxs.WaitForTexts(t, 2)
+	require.Len(t, texts, 2, "只应有 hello + listen start，不得有任何业务上行")
+	var hello, listenStart map[string]any
 	require.NoError(t, json.Unmarshal([]byte(texts[0]), &hello))
 	require.Equal(t, "hello", hello["type"])
+	require.NoError(t, json.Unmarshal([]byte(texts[1]), &listenStart))
+	require.Equal(t, "listen", listenStart["type"])
 	require.Zero(t, len(vd.snapshot()), "voicedrive 零收到请求")
 }
 
-// 端到端：提醒词命中 → 文本上行 → 平台 tools/call → 话术应答。
+// 端到端：提醒词命中 → listen.detect 文本上行 → 平台 tools/call → 话术应答。
 func TestE2E_HappyPath(t *testing.T) {
 	app, lxs, vd, _ := newHarness(t, func(c vdCall) groupclient.Result {
 		return groupclient.Result{Status: groupclient.StatusOK, Message: "夜班组已建好"}
 	})
 	app.HandleLine("小牛 建个群")
 
-	texts := lxs.WaitForTexts(t, 2)
+	texts := lxs.WaitForTexts(t, 3)
 	var up map[string]any
-	require.NoError(t, json.Unmarshal([]byte(texts[1]), &up))
-	require.Equal(t, "asr_text", up["type"])
+	require.NoError(t, json.Unmarshal([]byte(texts[2]), &up))
+	require.Equal(t, "listen", up["type"])
+	require.Equal(t, "detect", up["state"])
 	require.Equal(t, "建个群", up["text"])
 
 	resp := pushToolsCall(t, lxs, 7, "group.create", `{"name":"夜班组"}`)
@@ -460,6 +545,6 @@ func TestE2E_ClarifyLoop(t *testing.T) {
 	require.Len(t, calls, 2)
 	require.Contains(t, calls[1].Body, `"name":"夜班组"`)
 	require.False(t, app.confirm.Active())
-	// 裸答不应产生新的指令上行：文本帧仍只有 hello + 应答
-	require.Len(t, lxs.WaitForTexts(t, 2), 2)
+	// 裸答不应产生新的指令上行：文本帧仍只有 hello + listen start + mcp 应答
+	require.Len(t, lxs.WaitForTexts(t, 3), 3)
 }

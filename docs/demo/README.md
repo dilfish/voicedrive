@@ -31,7 +31,7 @@ voicedrive-command -mac AA:BB:CC:DD:EE:01 -server http://127.0.0.1:8080 -lingx-u
 
 令牌从本地安全环境变量 `LINX_TOKEN` 注入，不要把实际值写进命令历史或文档。本阶段不提供 OTA，需使用已绑定 MAC。默认真实 WS 为 `wss://xrobo-io.qiniuapi.com/v1/ws/`。与模拟服务联调时也使用显式本地测试凭据；不将其当生产 token。
 
-按 `mvp:cmd/linx-emu/main.go` 接口，hello 采用 PCM 16kHz mono s16le、320 samples/640 bytes/20ms，而非旧文档的 Opus/60ms。等待 hello.session_id 后发送 listen.start/manual 和 listen.detect/text，MCP 走 type:mcp + payload，初始化 capabilities.tools 为对象。客户端只运行一次连接生命周期，断线明确失败，不自动重连。支持下行音频回调但当前 CLI **不播放 TTS**，仅输出工具反馈文本，不代表音频验收通过。
+按 `mvp:cmd/linx-emu/main.go` 接口，hello 采用 PCM 16kHz mono s16le、320 samples/640 bytes/20ms，而非旧文档的 Opus/60ms。等待 hello.session_id 后发送 listen.start/manual 和 listen.detect/text，MCP 走 type:mcp + payload，初始化 capabilities.tools 为对象。客户端只运行一次连接生命周期，断线明确失败，不自动重连。下行音频由 `linx.Player` 播放泵消费，经 ffplay 从 stdin 流式播放（句间 600ms 空闲优雅收口、抢话打断）；未安装 ffplay 时降级为仅输出文本，不代表音频验收通过。
 
 V2 HTTP 桥接目标为 `/v1/group/*`（list 为 GET），身份仅由 X-VD-MAC 注入。当前 main 服务仍主要是 `/v1/groups/*` 旧接口，真实服务尚不能直接完成10工具联调，不能把默认地址可达视为能力就绪。可用本地 fake 完成协议/执行链路测试。
 

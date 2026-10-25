@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -122,6 +123,21 @@ func run(cfg config) error {
 	disp := mcp.NewDispatcherWithRegistry(reg)
 
 	buf := linx.NewAudioBuffer()
+	// player 消费 TTS 下行帧经 ffplay 播放；缺 ffplay 时降级为纯文本输出。
+	// 装配顺序：player 先于 client 创建，OnStateChange 回调闭包引用它时已定型
+	// （回调运行于 client 读循环 goroutine，赋值发生在 goroutine 启动之前）。
+	var player *linx.Player
+	if ffplay, err := exec.LookPath("ffplay"); err == nil {
+		player, err = linx.NewPlayer(buf, func(ctx context.Context) (linx.Sink, error) {
+			return newFFPlaySink(ctx, ffplay, os.Stderr)
+		}, 600*time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("创建播放泵: %w", err)
+		}
+		logger.Infof("TTS 播放后端: %s", ffplay)
+	} else {
+		logger.Warnf("未找到 ffplay（ffmpeg 套件），TTS 下行不播放，仅输出文本")
+	}
 	// uplinkCtx 承载注入/麦克风上行：平台 listen stop（ASR 判定说完）即取消，
 	// 采集与帧化随之停住；父 ctx（Ctrl-C）取消同样传播。
 	uplinkCtx, uplinkCancel := context.WithCancel(ctx)
@@ -133,6 +149,12 @@ func run(cfg config) error {
 		UserAgent:    userAgent,
 		ListenMode:   listenMode(cfg.Inject, cfg.Mic),
 		OnListenStop: uplinkCancel,
+		OnStateChange: func(s linx.SessionState) {
+			// 抢话打断：用户开口（listening）立即停掉在播的上一句回答。
+			if s == linx.StateListening && player != nil {
+				player.Stop()
+			}
+		},
 	}, buf, mcpHandler(disp), logger)
 	app = NewApp(cfg.WakeWord, cf, reg, &LinxCommandSink{Client: client}, out, logger)
 
@@ -141,6 +163,14 @@ func run(cfg config) error {
 			logger.Errorf("linx 退出: %v", err)
 		}
 	}()
+	if player != nil {
+		go func() {
+			// 播放泵 ctx 取消时返回 nil；其余为后端故障（如 ffplay 崩溃）。
+			if err := player.Run(ctx); err != nil {
+				logger.Errorf("播放泵退出: %v", err)
+			}
+		}()
+	}
 	go statusLoop(ctx, client, out)
 
 	fmt.Fprintf(out, "voicedrive-device mac=%s alias=%s wake-word=%s server=%s linx=%s\n", cfg.MAC, cfg.Alias, cfg.WakeWord, cfg.Server, linxURL)

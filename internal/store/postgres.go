@@ -413,7 +413,7 @@ func (p *Postgres) OwnsMessage(ctx context.Context, messageID, mac string) (bool
 func (p *Postgres) SetMessageAudio(ctx context.Context, messageID, mac, audioURL string, durationMS int) (model.Message, error) {
 	var message model.Message
 	err := p.db.QueryRowContext(ctx, `UPDATE messages m SET audio_url=$3,audio_status='ready',duration_ms=$4
-FROM devices d WHERE m.id=$1 AND d.mac=$2 AND m.from_device_id=d.id
+FROM devices d WHERE m.id=$1 AND d.mac=$2 AND m.from_device_id=d.id AND m.audio_status='pending'
 RETURNING m.id::text,m.group_id::text,m.from_device_id::text,m.text,m.audio_url,m.audio_status,m.duration_ms,m.seq,m.created_at`, messageID, mac, audioURL, durationMS).
 		Scan(&message.ID, &message.GroupID, &message.FromDeviceID, &message.Text, &message.AudioURL, &message.AudioStatus, &message.DurationMS, &message.Seq, &message.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -423,6 +423,40 @@ RETURNING m.id::text,m.group_id::text,m.from_device_id::text,m.text,m.audio_url,
 		return model.Message{}, fmt.Errorf("set message audio: %w", err)
 	}
 	return message, nil
+}
+
+// SetMessageFallback atomically claims a pending message for a generated audio
+// fallback. The conditional update makes upload and timeout mutually exclusive.
+func (p *Postgres) SetMessageFallback(ctx context.Context, messageID, audioURL string, durationMS int) (model.Message, error) {
+	var message model.Message
+	err := p.db.QueryRowContext(ctx, `UPDATE messages SET audio_url=$2,audio_status='ready',duration_ms=$3
+WHERE id=$1 AND audio_status='pending'
+RETURNING id::text,group_id::text,from_device_id::text,text,audio_url,audio_status,duration_ms,seq,created_at`, messageID, audioURL, durationMS).
+		Scan(&message.ID, &message.GroupID, &message.FromDeviceID, &message.Text, &message.AudioURL, &message.AudioStatus, &message.DurationMS, &message.Seq, &message.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Message{}, ErrConflict
+	}
+	if err != nil {
+		return model.Message{}, fmt.Errorf("set message fallback: %w", err)
+	}
+	return message, nil
+}
+
+// SetMessageFailed marks a pending message failed when fallback generation
+// cannot produce audio. It is also conditional to preserve ready messages.
+func (p *Postgres) SetMessageFailed(ctx context.Context, messageID string) error {
+	result, err := p.db.ExecContext(ctx, `UPDATE messages SET audio_status='failed' WHERE id=$1 AND audio_status='pending'`, messageID)
+	if err != nil {
+		return fmt.Errorf("set message failed: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read message failure result: %w", err)
+	}
+	if count == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (p *Postgres) PutIdempotency(ctx context.Context, key string, value any) (bool, error) {

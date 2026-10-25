@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Study-of-slag-weng/voicedrive1/internal/device"
 	"github.com/Study-of-slag-weng/voicedrive1/internal/groupresolve"
@@ -22,6 +24,8 @@ type Handler struct {
 	store    *store.Postgres
 	hub      *deliveryHub
 	audioDir string
+	fallback *fallbackScheduler
+	audioMu  sync.Mutex
 }
 
 func NewHandler(s *store.Postgres) http.Handler {
@@ -30,6 +34,7 @@ func NewHandler(s *store.Postgres) http.Handler {
 		audioDir = "./data/audio"
 	}
 	h := &Handler{store: s, hub: newDeliveryHub(s), audioDir: audioDir}
+	h.fallback = newFallbackScheduler(s, h.hub, audioDir, SilenceFallback{}, &h.audioMu)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/devices", h.device)
 	mux.HandleFunc("POST /v1/groups", h.group)
@@ -226,6 +231,10 @@ func (h *Handler) message(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
+		// The request context ends as soon as this HTTP response is written. The
+		// fallback must outlive that request and is cancelled by a successful upload
+		// or server shutdown in a future lifecycle hook.
+		h.fallback.schedule(context.Background(), m)
 	} else {
 		if err := h.hub.broadcast(r.Context(), m); err != nil {
 			fail(w, err)
@@ -273,6 +282,9 @@ func (h *Handler) uploadAudio(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	data = pcmWAV(data)
+	h.audioMu.Lock()
+	defer h.audioMu.Unlock()
 	if err := os.MkdirAll(h.audioDir, 0755); err != nil {
 		fail(w, fmt.Errorf("create audio directory: %w", err))
 		return
@@ -295,16 +307,20 @@ func (h *Handler) uploadAudio(w http.ResponseWriter, r *http.Request) {
 		fail(w, closeErr)
 		return
 	}
+	url := "/v1/messages/" + r.PathValue("id") + "/audio"
 	if err := os.Rename(temporary.Name(), path); err != nil {
 		fail(w, fmt.Errorf("write audio: %w", err))
 		return
 	}
-	url := "/v1/messages/" + r.PathValue("id") + "/audio"
 	message, err := h.store.SetMessageAudio(r.Context(), r.PathValue("id"), mac, url, durationMS)
 	if err != nil {
+		_ = os.Remove(path)
 		fail(w, err)
 		return
 	}
+	// Only a successful conditional pending->ready transition may cancel the
+	// fallback. Invalid or unauthorized uploads must leave it intact.
+	h.fallback.cancel(r.PathValue("id"))
 	if err := h.hub.broadcast(r.Context(), message); err != nil {
 		fail(w, err)
 		return

@@ -40,6 +40,13 @@ type Message struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// AudioStatus values describe the message audio lifecycle.
+const (
+	AudioPending = "pending"
+	AudioReady   = "ready"
+	AudioFailed  = "failed"
+)
+
 // DeviceMessage is a message together with the group it was delivered from.
 type DeviceMessage struct {
 	Message

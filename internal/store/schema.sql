@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
     from_device_id UUID NOT NULL REFERENCES devices(id),
     text TEXT NOT NULL,
     audio_url TEXT NOT NULL DEFAULT '',
+    audio_status TEXT NOT NULL DEFAULT 'pending',
     duration_ms INTEGER NOT NULL DEFAULT 0,
     seq BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

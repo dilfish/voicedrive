@@ -37,4 +37,15 @@ go run ./cmd/voicedrive-device -mac AA:BB:CC:DD:EE:01 \
 
 `bind_message` 会通过客户端回调交给音频缓冲/上传模块；连续 3 次 heartbeat 写入失败后客户端主动断开并进入重连退避。
 
+消息音频上传接口：
+
+```bash
+curl -X POST http://localhost:8080/v1/messages/<message-id>/audio \
+  -H 'X-VD-MAC: AA:BB:CC:DD:EE:01' \
+  -H 'Content-Type: audio/wav' \
+  --data-binary @voice.wav
+```
+
+V0 接受 16 kHz、单声道、16-bit PCM 或 WAV，大小上限 2 MB。没有 `audio_url` 的消息先通过 `bind_message` 请求发送设备上传，上传成功后才向当前焦点群投递 `message`。
+
 完整的开发协作文档见 [docs/collaboration](docs/collaboration/README.md)。

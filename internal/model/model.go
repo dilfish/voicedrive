@@ -38,3 +38,9 @@ type Message struct {
 	Seq          int64     `json:"seq"`
 	CreatedAt    time.Time `json:"created_at"`
 }
+
+// DeviceMessage is a message together with the group it was delivered from.
+type DeviceMessage struct {
+	Message
+	GroupName string `json:"group_name"`
+}

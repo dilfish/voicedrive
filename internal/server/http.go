@@ -6,18 +6,25 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/dilfish/voicedrive/internal/model"
 	"github.com/dilfish/voicedrive/internal/store"
 )
 
-type Handler struct{ store *store.Postgres }
+type Handler struct {
+	store *store.Postgres
+	hub   *deliveryHub
+}
 
 func NewHandler(s *store.Postgres) http.Handler {
-	h := &Handler{store: s}
+	h := &Handler{store: s, hub: newDeliveryHub(s)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/devices", h.device)
 	mux.HandleFunc("POST /v1/groups", h.group)
 	mux.HandleFunc("POST /v1/groups/{id}/members", h.member)
+	mux.HandleFunc("POST /v1/groups/{id}/switch", h.switchGroup)
+	mux.HandleFunc("POST /v1/groups/switch", h.switchGroupByName)
 	mux.HandleFunc("POST /v1/groups/{id}/messages", h.message)
+	mux.HandleFunc("GET /v1/device", h.hub.serveHTTP)
 	return mux
 }
 
@@ -80,6 +87,59 @@ func (h *Handler) member(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, http.StatusCreated, m)
 }
+
+func (h *Handler) switchGroup(w http.ResponseWriter, r *http.Request) {
+	mac := strings.TrimSpace(r.Header.Get("X-VD-MAC"))
+	if mac == "" {
+		failStatus(w, http.StatusBadRequest, errors.New("X-VD-MAC is required"))
+		return
+	}
+	group, err := h.store.SwitchActiveGroup(r.Context(), mac, r.PathValue("id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if err := h.hub.notifyGroupChanged(r.Context(), mac, group); err != nil {
+		fail(w, err)
+		return
+	}
+	writeSwitchResult(w, group)
+}
+
+func (h *Handler) switchGroupByName(w http.ResponseWriter, r *http.Request) {
+	mac := strings.TrimSpace(r.Header.Get("X-VD-MAC"))
+	if mac == "" {
+		failStatus(w, http.StatusBadRequest, errors.New("X-VD-MAC is required"))
+		return
+	}
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		failStatus(w, http.StatusBadRequest, errors.New("name is required"))
+		return
+	}
+	group, err := h.store.SwitchActiveGroupByName(r.Context(), mac, in.Name)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if err := h.hub.notifyGroupChanged(r.Context(), mac, group); err != nil {
+		fail(w, err)
+		return
+	}
+	writeSwitchResult(w, group)
+}
+
+func writeSwitchResult(w http.ResponseWriter, group model.Group) {
+	write(w, http.StatusOK, struct {
+		Group  model.Group `json:"group"`
+		Prompt string      `json:"prompt"`
+	}{Group: group, Prompt: "现在只听" + group.Name})
+}
 func (h *Handler) message(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		MAC        string `json:"mac"`
@@ -96,6 +156,10 @@ func (h *Handler) message(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := h.store.CreateMessage(r.Context(), r.PathValue("id"), in.MAC, in.Text, in.AudioURL, in.DurationMS, r.Header.Get("Idempotency-Key"))
 	if err != nil {
+		fail(w, err)
+		return
+	}
+	if err := h.hub.broadcast(r.Context(), m); err != nil {
 		fail(w, err)
 		return
 	}

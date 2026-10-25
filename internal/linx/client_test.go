@@ -143,6 +143,29 @@ func TestClient_SendListenStop(t *testing.T) {
 	}, stop)
 }
 
+// 平台下发 listen stop 时须回调 OnListenStop：上行采集据此自动停麦收口。
+func TestClient_OnListenStop(t *testing.T) {
+	srv := linxtest.New(t)
+	fired := make(chan struct{}, 1)
+	c := linx.NewClient(linx.Config{
+		URL: srv.URL(), BackoffBase: 5 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
+		OnListenStop: func() { fired <- struct{}{} },
+	}, linx.NewAudioBuffer(), nil, logx.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+	srv.WaitForTexts(t, 2)
+
+	c.Wake()
+	require.NoError(t, srv.PushText(`{"type":"listen","state":"stop"}`))
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("平台 listen stop 未触发 OnListenStop")
+	}
+	require.Equal(t, linx.StateThinking, c.State())
+}
+
 func TestClient_MCPRoundtrip(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), func(payload []byte) []byte {

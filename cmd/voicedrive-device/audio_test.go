@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -108,6 +110,71 @@ func TestUplinkWAV_Errors(t *testing.T) {
 			err := uplinkWAV(context.Background(), nil, path)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// ctx 取消后：已排队帧读到的不再上行、也不补 listen stop（平台已收口或进程退出）。
+func TestStreamUplink_CancelStopsEarly(t *testing.T) {
+	srv := linxtest.New(t)
+	c := newAudioClient(t, srv.URL())
+	srv.WaitForTexts(t, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- streamUplink(ctx, c, pr, 0) }()
+
+	frame := bytes.Repeat([]byte{7}, pcmFrameBytes)
+	_, err := pw.Write(frame) // io.Pipe 写完即整帧已被消费
+	require.NoError(t, err)
+	require.Equal(t, 1, srv.WaitForBinaries(t, 1))
+
+	cancel()
+	_, err = pw.Write(frame) // 第二帧：ctx 已取消，读到也不得上行
+	require.NoError(t, err)
+	require.NoError(t, pw.Close())
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 streamUplink 未返回")
+	}
+	time.Sleep(50 * time.Millisecond) // 观察窗：确认没有迟到帧/stop 帧
+	count, texts := 0, 0
+	for _, f := range srv.Frames() {
+		if f.Binary {
+			count++
+		} else {
+			texts++
+		}
+	}
+	require.Equal(t, 1, count, "取消后不得再上行帧")
+	require.Equal(t, 2, texts, "取消路径不发 listen stop（仍只有 hello + listen start）")
+}
+
+func TestMicContext(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	tests := []struct {
+		name        string
+		dur         time.Duration
+		wantDeadine bool
+	}{
+		{name: "0 持续采集无截止", dur: 0, wantDeadine: false},
+		{name: "正时长有截止兜底", dur: 5 * time.Second, wantDeadine: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cctx, cancel := micContext(parent, tt.dur)
+			defer cancel()
+			dl, ok := cctx.Deadline()
+			require.Equal(t, tt.wantDeadine, ok)
+			if ok {
+				require.WithinDuration(t, time.Now().Add(tt.dur+2*time.Second), dl, time.Second)
+			}
 		})
 	}
 }

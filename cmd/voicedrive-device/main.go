@@ -49,7 +49,7 @@ func parseFlags(args []string) (config, error) {
 	token := fs.String("token", os.Getenv("LINX_TOKEN"), "WS token，留空自动走 OTA 引导")
 	inject := fs.String("inject", "", "注入 WAV 音频文件（16k/mono/s16，等同一次开口）")
 	mic := fs.String("mic", "", "用电脑麦克风采集上行（ffmpeg avfoundation 设备序号，如 0），需装 ffmpeg")
-	micDur := fs.Duration("mic-duration", 6*time.Second, "--mic 采集时长")
+	micDur := fs.Duration("mic-duration", 0, "--mic 采集时长；0=持续采集，说完由平台 listen stop 收口，Ctrl-C 退出")
 	if err := fs.Parse(args); err != nil {
 		return config{}, fmt.Errorf("解析参数: %w", err)
 	}
@@ -122,12 +122,16 @@ func run(cfg config) error {
 	disp := mcp.NewDispatcherWithRegistry(reg)
 
 	buf := linx.NewAudioBuffer()
+	// uplinkCtx 承载注入/麦克风上行：平台 listen stop（ASR 判定说完）即取消，
+	// 采集与帧化随之停住；父 ctx（Ctrl-C）取消同样传播。
+	uplinkCtx, uplinkCancel := context.WithCancel(ctx)
 	client := linx.NewClient(linx.Config{
-		URL:       linxURL,
-		Token:     token,
-		DeviceID:  cfg.MAC,
-		ClientID:  clientID,
-		UserAgent: userAgent,
+		URL:          linxURL,
+		Token:        token,
+		DeviceID:     cfg.MAC,
+		ClientID:     clientID,
+		UserAgent:    userAgent,
+		OnListenStop: uplinkCancel,
 	}, buf, mcpHandler(disp), logger)
 	app = NewApp(cfg.WakeWord, cf, reg, &LinxCommandSink{Client: client}, out, logger)
 
@@ -142,15 +146,15 @@ func run(cfg config) error {
 	if cfg.Inject != "" || cfg.Mic != "" {
 		// 注入/麦克风等同一次开口（02 §3）：会话就绪后上行，失败只报错不影响指令循环。
 		go func() {
-			if err := waitSession(ctx, client); err != nil {
+			if err := waitSession(uplinkCtx, client); err != nil {
 				logger.Warnf("音频上行: %v", err)
 				return
 			}
 			var err error
 			if cfg.Inject != "" {
-				err = uplinkWAV(ctx, client, cfg.Inject)
+				err = uplinkWAV(uplinkCtx, client, cfg.Inject)
 			} else {
-				err = uplinkMic(ctx, client, cfg.Mic, cfg.MicDuration, os.Stderr, logger)
+				err = uplinkMic(uplinkCtx, client, cfg.Mic, cfg.MicDuration, os.Stderr, logger)
 			}
 			if err != nil {
 				logger.Errorf("音频上行: %v", err)

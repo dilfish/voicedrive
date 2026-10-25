@@ -42,7 +42,8 @@ func waitSession(ctx context.Context, c *linx.Client) error {
 }
 
 // streamUplink 把 r 中的 PCM 按 20ms 帧上行：Wake 注入本地唤醒、pace>0 时按帧
-// 间隔配速、ctx 取消即停，正常发完补 listen stop 收口。
+// 间隔配速；正常发完补 listen stop 收口，ctx 中途取消则不再补（平台已收口或
+// 进程退出，重复 stop 无意义）。
 func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Duration) error {
 	c.Wake()
 	var tk *time.Ticker
@@ -62,6 +63,9 @@ func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Du
 	if err != nil {
 		return fmt.Errorf("帧化 PCM: %w", err)
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	c.SendListenStop()
 	return nil
 }
@@ -80,9 +84,10 @@ func uplinkWAV(ctx context.Context, c *linx.Client, path string) error {
 }
 
 // uplinkMic 经 ffmpeg 采集麦克风 PCM 并实时上行（--mic，设备序号对 avfoundation
-// 而言形如 ":0"；需安装 ffmpeg，macOS 还需给终端麦克风权限）。
+// 而言形如 ":0"；需安装 ffmpeg，macOS 还需给终端麦克风权限）。dur>0 为定长
+// 采集兜底；dur=0 持续采集，说完由平台 listen stop 判定收口。
 func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Duration, stderr io.Writer, logger logx.Logger) error {
-	cctx, cancel := context.WithTimeout(ctx, dur+2*time.Second)
+	cctx, cancel := micContext(ctx, dur)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
@@ -102,6 +107,19 @@ func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Dura
 		}
 		_ = cmd.Wait()
 	}()
-	logger.Infof("麦克风采集 %v（avfoundation 设备 :%s），说完等收口…", dur, device)
+	if dur > 0 {
+		logger.Infof("麦克风定长采集 %v（avfoundation 设备 :%s）", dur, device)
+	} else {
+		logger.Infof("麦克风持续采集（avfoundation 设备 :%s），说完由平台判定收口，Ctrl-C 退出", device)
+	}
 	return streamUplink(ctx, c, stdout, 0)
+}
+
+// micContext 构造采集 ctx：dur=0 持续（无截止），dur>0 加 dur+2s 截止兜底
+// （余量留给 ffmpeg 收尾，避免截掉最后半句）。
+func micContext(ctx context.Context, dur time.Duration) (context.Context, context.CancelFunc) {
+	if dur <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, dur+2*time.Second)
 }

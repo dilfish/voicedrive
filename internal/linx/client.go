@@ -17,14 +17,15 @@ import (
 
 // Config 是 WS 客户端配置；零值字段取 NewClient 内默认值。
 type Config struct {
-	URL         string        // 灵犀 WS 端点
-	BackoffBase time.Duration // 重连退避起始值（默认 1s，测试注入小值）
-	BackoffMax  time.Duration // 重连退避上限（默认 30s）
-	OutboxSize  int           // 下行发送队列容量（默认 64）
-	Token       string        // OTA 换来的 WS Bearer token（空则不带 Authorization 头）
-	DeviceID    string        // 设备 MAC，握手 Device-Id 头
-	ClientID    string        // 设备侧生成的 UUID，握手 Client-Id 头
-	UserAgent   string        // 握手 User-Agent 头
+	URL          string        // 灵犀 WS 端点
+	BackoffBase  time.Duration // 重连退避起始值（默认 1s，测试注入小值）
+	BackoffMax   time.Duration // 重连退避上限（默认 30s）
+	OutboxSize   int           // 下行发送队列容量（默认 64）
+	Token        string        // OTA 换来的 WS Bearer token（空则不带 Authorization 头）
+	DeviceID     string        // 设备 MAC，握手 Device-Id 头
+	ClientID     string        // 设备侧生成的 UUID，握手 Client-Id 头
+	UserAgent    string        // 握手 User-Agent 头
+	OnListenStop func()        // 平台下发 listen stop 时回调（状态机迁移后）；上行采集据此停麦收口，可为 nil
 }
 
 func (c Config) withDefaults() Config {
@@ -293,6 +294,9 @@ func (c *Client) handleText(data []byte) {
 	case "listen":
 		if msg.State == "stop" {
 			c.applyEvent(EventASRStop)
+			if c.cfg.OnListenStop != nil {
+				c.cfg.OnListenStop()
+			}
 		}
 	case "tts":
 		switch msg.State {

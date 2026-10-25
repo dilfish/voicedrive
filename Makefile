@@ -1,7 +1,10 @@
 DATABASE_URL ?= postgres://voicedrive:voicedrive@localhost:5432/voicedrive?sslmode=disable
 .DEFAULT_GOAL := build
 
-.PHONY: build test db db-down run test-mock demo demo-check test-demo fmt-check
+.PHONY: build test db db-down run test-agent test-mock demo demo-check test-demo fmt-check
+
+test-agent:
+	go test ./internal/agenteval ./cmd/agent-eval
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }

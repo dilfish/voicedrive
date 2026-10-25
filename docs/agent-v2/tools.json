@@ -1,0 +1,12 @@
+[
+  {"name":"group.create","description":"建群。name 为必填群名；passcode 为可选口述口令（4~6 位数字字符串），未口述勿填，由系统生成。创建者自动入群。","phase":"V0"},
+  {"name":"group.join","description":"按必填 passcode 数字字符串口令入群；成功后自动切焦点，可直接对讲。缺口令须反问。","phase":"V0"},
+  {"name":"group.switch","description":"把本设备焦点切到 name 指定的已加入群。name 必填，可经服务端归一化；多命中须反问，切入静音群自动解除静音。","phase":"V0"},
+  {"name":"group.mute","description":"设置 name 指定群的收听静音；name 必填，on 为必填布尔值，true 静音、false 取消。仅静收，静音只对非焦点群生效。","phase":"V0"},
+  {"name":"group.list","description":"查询本设备已加入的所有群及当前焦点群；无参数。无群也应如实返回。","phase":"V0"},
+  {"name":"group.leave","description":"直接退出 name 指定的群，name 必填，不额外确认；若退出焦点群，由服务端调整焦点。","phase":"V0.5"},
+  {"name":"group.rename","description":"将 name 指定群改名为 new_name，两项均为必填字符串；不是修改个人别名。","phase":"V0.5"},
+  {"name":"group.pat","description":"拍一拍 alias 指定的人，alias 必填；多人同名先消歧，对方确认后才切群，静音源群则不打扰。","phase":"V0.5"},
+  {"name":"group.invite","description":"邀请 alias 指定好友进入 group_name 指定群，两项必填；需要被邀请方确认，不能替对方同意。","phase":"V0.5"},
+  {"name":"group.query_member","description":"查询 group_name 群内有没有 alias 指定的人，两项必填；只能查询本设备所在群，多人命中先消歧。","phase":"V0.5"}
+]

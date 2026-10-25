@@ -3,6 +3,8 @@ package linx_test
 import (
 	"context"
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +126,37 @@ func TestClient_ReconnectAndResendHello(t *testing.T) {
 	var hello map[string]any
 	require.NoError(t, json.Unmarshal([]byte(texts[1]), &hello))
 	require.Equal(t, "hello", hello["type"])
+}
+
+// 服务器主动断连后写泵必须随会话退出：否则每次重连泄漏一个 goroutine，
+// 且旧泵与新泵争夺 outbox，可能吞掉重连后的首条上行消息。
+func TestClient_WritePumpExitsOnServerClose(t *testing.T) {
+	srv := linxtest.New(t)
+	_, _ = newClient(t, srv.URL(), nil)
+	srv.WaitForTexts(t, 1)
+	srv.KillConnections()
+	srv.WaitForTexts(t, 2) // 第一次重连成功
+	srv.KillConnections()
+	srv.WaitForTexts(t, 3) // 第二次重连成功
+
+	// 任一时刻只应存在当前会话的 1 个写泵；泄漏的旧泵同样停在该 select 上。
+	require.Eventually(t, func() bool {
+		return writePumpGoroutines() <= 1
+	}, 2*time.Second, 5*time.Millisecond, "重连后写泵 goroutine 未随旧会话退出（泄漏）")
+}
+
+// writePumpGoroutines 统计处于 (*Client).writePump 帧的 goroutine 数；
+// 匹配串须带 ")." 前缀，避免把本测试自身栈里的 writePump 字样计入。
+func writePumpGoroutines() int {
+	buf := make([]byte, 1<<22)
+	buf = buf[:runtime.Stack(buf, true)]
+	n := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, ").writePump(") {
+			n++
+		}
+	}
+	return n
 }
 
 func TestClient_SendAudioAndText(t *testing.T) {

@@ -158,7 +158,8 @@ func (c *Client) session(ctx context.Context) error {
 	}
 
 	pumpDone := make(chan struct{})
-	go c.writePump(ctx, conn, pumpDone)
+	pumpStop := make(chan struct{})
+	go c.writePump(ctx, conn, pumpStop, pumpDone)
 
 	sessDone := make(chan struct{})
 	go func() {
@@ -173,7 +174,9 @@ func (c *Client) session(ctx context.Context) error {
 	readErr := c.readLoop(conn)
 	close(sessDone)
 
-	// 写泵可能正阻塞在 WriteMessage，关连接解除；至多等 1s 防御性兜底。
+	// 关停写泵：先关 stop 唤醒空转 select，再关连接解除阻塞中的写；
+	// 写泵不随会话退出会泄漏 goroutine，且旧泵与新泵争夺 outbox 吞消息。
+	close(pumpStop)
 	_ = conn.Close()
 	select {
 	case <-pumpDone:
@@ -183,11 +186,13 @@ func (c *Client) session(ctx context.Context) error {
 	return readErr
 }
 
-func (c *Client) writePump(ctx context.Context, conn *websocket.Conn, done chan<- struct{}) {
+func (c *Client) writePump(ctx context.Context, conn *websocket.Conn, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-stop:
 			return
 		case out, ok := <-c.outbox:
 			if !ok {

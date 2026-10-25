@@ -1,5 +1,9 @@
 # voicedrive
 
+## V2 指令接入与演示预检（#12）
+
+基于 `mvp` 的真实灵汐接口提供独立指令入口 `cmd/voicedrive-command`，不替换现有设备控制面。配置、演示步骤和待验边界见 [docs/demo](docs/demo/README.md)。`make test-demo` 离线验证指令执行链路及编排框架；`make demo` 在 V2 原声媒体等依赖缺失时明确报告阻塞，不以旧上传链路代替。
+
 ## F01 服务骨架
 
 按 issue #2 提供 Postgres 服务骨架、设备注册、群/成员/消息模型及群内消息序号。

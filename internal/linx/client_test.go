@@ -398,3 +398,66 @@ func TestClient_ReplyFramesDisplayed(t *testing.T) {
 		})
 	}
 }
+
+// OnStateChange 须在每次合法迁移后触发，且回调在锁外执行（回调内可安全
+// 调用 State()）；非法迁移（idle 直接 tts start）不得触发。
+func TestClient_OnStateChangeFiresOnTransitions(t *testing.T) {
+	srv := linxtest.New(t)
+	states := make(chan linx.SessionState, 8)
+	buf := linx.NewAudioBuffer()
+	var c *linx.Client
+	c = linx.NewClient(linx.Config{
+		URL:         srv.URL(),
+		BackoffBase: 5 * time.Millisecond,
+		BackoffMax:  20 * time.Millisecond,
+		OutboxSize:  64,
+		Token:       "tk-test",
+		DeviceID:    "AA:BB:CC:DD:EE:FF",
+		ClientID:    "cid-test",
+		UserAgent:   "vd-test/0.1",
+		OnStateChange: func(s linx.SessionState) {
+			_ = c.State() // 回调内读状态不得死锁（回调须在锁外）
+			states <- s
+		},
+	}, buf, nil, logx.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+	srv.WaitForTexts(t, 1)
+
+	c.Wake()
+	require.NoError(t, srv.PushText(`{"type":"listen","state":"stop"}`))
+	require.NoError(t, srv.PushText(`{"type":"tts","state":"start"}`))
+	require.NoError(t, srv.PushText(`{"type":"tts","state":"stop"}`))
+	want := []linx.SessionState{linx.StateListening, linx.StateThinking, linx.StateSpeaking, linx.StateIdle}
+	got := make([]linx.SessionState, 0, 4)
+	for range want {
+		select {
+		case s := <-states:
+			got = append(got, s)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("等待状态回调超时，已收到 %v", got)
+		}
+	}
+	require.Equal(t, want, got)
+	// 全部迁移完成后不得有额外回调（如非法迁移误触发）。
+	select {
+	case s := <-states:
+		t.Fatalf("意外多余回调: %v", s)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// 重连后旧会话的 TTS 残帧必须作废：连接中断时平台从头重发，残帧播出来
+// 会与新一轮 TTS 串音。
+func TestClient_ReconnectClearsStaleTTSFrames(t *testing.T) {
+	srv := linxtest.New(t)
+	_, buf := newClient(t, srv.URL(), nil)
+	srv.WaitForTexts(t, 2)
+	require.NoError(t, srv.PushBinary([]byte("stale")))
+	require.Eventually(t, func() bool { return buf.HasData() }, 2*time.Second, 2*time.Millisecond)
+
+	srv.KillConnections()
+	srv.WaitForTexts(t, 4) // 重连完成（重新 hello + listen start）
+	require.Eventually(t, func() bool { return !buf.HasData() }, 2*time.Second, 2*time.Millisecond)
+}

@@ -4,6 +4,10 @@
 
 版本化 prompt、工具描述、指令及群名语料和离线评测说明见 [docs/agent-v2](docs/agent-v2/README.md)。离线评测不调用灵矽，不代表真实模型或端到端验收已通过。
 
+## V2 剧本化 mock（#11）
+
+JSON 剧本、独立 WebSocket mock、输入适配接口和验收边界见 [docs/mock](docs/mock/README.md)。运行 `make test-mock` 可离线验证框架；真实设备指令及确认链路仍需依赖组件就绪后联调。
+
 ## F01 服务骨架
 
 按 issue #2 提供 Postgres 服务骨架、设备注册、群/成员/消息模型及群内消息序号。

@@ -1,0 +1,20 @@
+{
+  "name": "group-and-message",
+  "steps": [
+    {
+      "name": "register sender",
+      "path": "/v1/devices",
+      "body": {"mac":"AA:BB:CC:DD:EE:01","name":"老王"},
+      "expect_code": 200,
+      "expect": {"mac":"AA:BB:CC:DD:EE:01"}
+    },
+    {"name":"register receiver","path":"/v1/devices","body":{"mac":"AA:BB:CC:DD:EE:02","name":"小李"},"expect_code":200},
+    {"name":"create group","path":"/v1/groups","body":{"mac":"AA:BB:CC:DD:EE:01","name":"夜班组"},"expect_code":201,"capture":{"group_id":"id"},"expect":{"name":"夜班组"}},
+    {"name":"join receiver","path":"/v1/groups/${group_id}/members","body":{"mac":"AA:BB:CC:DD:EE:02","alias":"小李"},"expect_code":201},
+    {"name":"switch receiver","path":"/v1/groups/${group_id}/switch","mac":"AA:BB:CC:DD:EE:02","expect":{"group.id":"${group_id}","prompt":"现在只听夜班组"}},
+    {"name":"send message","path":"/v1/groups/${group_id}/messages","body":{"mac":"AA:BB:CC:DD:EE:01","text":"我快到了"},"expect_code":201,"capture":{"message_id":"id"},"expect":{"audio_status":"pending","text":"我快到了"}},
+    {"name":"reject missing audio identity","path":"/v1/messages/${message_id}/audio","expect_code":400},
+    {"name":"upload silent audio","path":"/v1/messages/${message_id}/audio","mac":"AA:BB:CC:DD:EE:01","silence_ms":100,"expect":{"audio_status":"ready","duration_ms":100}},
+    {"name":"fetch uploaded audio","method":"GET","path":"/v1/messages/${message_id}/audio"}
+  ]
+}

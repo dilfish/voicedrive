@@ -357,6 +357,12 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text,group_id::text,from_device_id
 }
 
 // SetMessageAudio stores the ready audio metadata after verifying message ownership.
+func (p *Postgres) OwnsMessage(ctx context.Context, messageID, mac string) (bool, error) {
+	var owns bool
+	err := p.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages m JOIN devices d ON d.id=m.from_device_id WHERE m.id=$1 AND d.mac=$2)`, messageID, mac).Scan(&owns)
+	return owns, err
+}
+
 func (p *Postgres) SetMessageAudio(ctx context.Context, messageID, mac, audioURL string, durationMS int) (model.Message, error) {
 	var message model.Message
 	err := p.db.QueryRowContext(ctx, `UPDATE messages m SET audio_url=$3,audio_status='ready',duration_ms=$4

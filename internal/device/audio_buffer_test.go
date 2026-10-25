@@ -1,13 +1,68 @@
 package device
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestExactMatchBeforeNormalizedAndFallbackCount(t *testing.T) {
+	b := NewUtteranceBuffer()
+	_ = b.Add("normalized", "hello!", []byte{1, 2}, time.Now())
+	_ = b.Add("exact", "hello", []byte{3, 4}, time.Now())
+	if id, _, _ := b.Bind("hello"); id != "exact" {
+		t.Fatalf("bound %s", id)
+	}
+	b.OnFallback = func(string) {
+		if b.FallbackCount() != 1 {
+			t.Error("missing fallback count")
+		}
+	}
+	b.Bind("other")
+	if err := b.Add("oversized", "", make([]byte, b.limit+2), time.Now()); err == nil {
+		t.Fatal("accepted oversized utterance")
+	}
+}
+
+func TestBindUploadsOriginalPCMAndLatestSTT(t *testing.T) {
+	b := NewUtteranceBuffer()
+	pcm := []byte{1, 2, 3, 4}
+	_ = b.Add("first", "", pcm, time.Now())
+	if !b.SetLatestTranscript("first") {
+		t.Fatal("STT not attached")
+	}
+	_ = b.Add("second", "second", []byte{5, 6}, time.Now())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ := io.ReadAll(r.Body)
+		if !bytes.Equal(got, pcm) {
+			t.Errorf("uploaded %v", got)
+		}
+	}))
+	defer srv.Close()
+	if err := b.BindAndUpload(context.Background(), &AudioUploader{Endpoint: srv.URL, MAC: "test"}, "m1", "first"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadCancellationDuringRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "retry", 502) }))
+	defer srv.Close()
+	u := AudioUploader{Endpoint: srv.URL, MAC: "test", OnRetry: func(int, error) { cancel() }}
+	started := time.Now()
+	if err := u.Upload(ctx, "m1", []byte{1, 2}); err != context.Canceled {
+		t.Fatalf("error = %v", err)
+	}
+	if time.Since(started) > 200*time.Millisecond {
+		t.Fatal("cancellation waited for retry")
+	}
+}
 
 func TestUtteranceBufferMatchesAndFallsBack(t *testing.T) {
 	buffer := NewUtteranceBuffer()

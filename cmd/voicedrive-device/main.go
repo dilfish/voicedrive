@@ -15,6 +15,7 @@ import (
 
 func main() {
 	endpoint := flag.String("server", "ws://localhost:8080/v1/device", "voicedrive control WebSocket endpoint")
+	httpEndpoint := flag.String("http-server", "http://localhost:8080", "voicedrive HTTP endpoint")
 	mac := flag.String("mac", "", "device MAC address")
 	token := flag.String("token", "", "optional bearer token")
 	flag.Parse()
@@ -34,6 +35,13 @@ func main() {
 	defer queue.Close()
 	queue.OnOverflow = func(count int) {
 		log.Printf("[%s] skipped %d queued messages", *mac, count)
+	}
+	buffer := device.NewUtteranceBuffer()
+	uploader := &device.AudioUploader{Endpoint: *httpEndpoint, MAC: *mac}
+	buffer.OnFallback = func(transcript string) { log.Printf("[%s] audio pairing fallback for %q", *mac, transcript) }
+	uploader.OnRetry = func(attempt int, err error) { log.Printf("[%s] audio upload retry %d: %v", *mac, attempt, err) }
+	client.OnBindMessage = func(ctx context.Context, messageID, text string) error {
+		return buffer.BindAndUpload(ctx, uploader, messageID, text)
 	}
 	client.OnMessage = func(_ context.Context, message model.DeviceMessage) error {
 		queue.Enqueue(message)

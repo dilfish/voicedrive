@@ -39,6 +39,16 @@ func (s *LinxCommandSink) SendCommand(text string) {
 	s.Client.SendDetect(text)
 }
 
+// listenMode 决定 listen start 的收口模式：麦克风持续采集走 auto（平台端点
+// 检测自收口，支持连续说话）；注入文件与纯指令走 manual（设备音频发完补
+// listen stop 收口）。
+func listenMode(inject, mic string) string {
+	if mic != "" {
+		return "auto"
+	}
+	return "manual"
+}
+
 // App 承载终端文本分流（02 §3）与确认重放；HandleLine 仅由输入循环单线程
 // 调用，say 的锁仅为 onExpire 定时器 goroutine 的并发播报而设。
 type App struct {

@@ -125,7 +125,7 @@ func TestStreamUplink_CancelStopsEarly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- streamUplink(ctx, c, pr, 0) }()
+	go func() { done <- streamUplink(ctx, c, pr, 0, true) }()
 
 	frame := bytes.Repeat([]byte{7}, pcmFrameBytes)
 	_, err := pw.Write(frame) // io.Pipe 写完即整帧已被消费
@@ -154,6 +154,28 @@ func TestStreamUplink_CancelStopsEarly(t *testing.T) {
 	}
 	require.Equal(t, 1, count, "取消后不得再上行帧")
 	require.Equal(t, 2, texts, "取消路径不发 listen stop（仍只有 hello + listen start）")
+}
+
+// mic 连续采集（stopAtEOF=false，auto 模式）：流结束不得补 listen stop，
+// 收口由平台端点检测负责，设备补 stop 会打断连续对话。
+func TestStreamUplink_NoStopAtEOF(t *testing.T) {
+	srv := linxtest.New(t)
+	c := newAudioClient(t, srv.URL())
+	srv.WaitForTexts(t, 2)
+
+	err := streamUplink(context.Background(), c,
+		bytes.NewReader(bytes.Repeat([]byte{7}, pcmFrameBytes)), 0, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, srv.WaitForBinaries(t, 1))
+
+	time.Sleep(50 * time.Millisecond) // 观察窗：确认没有迟到的 stop 帧
+	texts := 0
+	for _, f := range srv.Frames() {
+		if !f.Binary {
+			texts++
+		}
+	}
+	require.Equal(t, 2, texts, "auto 模式 EOF 不补 listen stop（仍只有 hello + listen start）")
 }
 
 // captureLogger 记录 Warnf 输出的 fake logger（等待提示用例）。

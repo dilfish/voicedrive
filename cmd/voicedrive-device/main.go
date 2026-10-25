@@ -131,6 +131,7 @@ func run(cfg config) error {
 		DeviceID:     cfg.MAC,
 		ClientID:     clientID,
 		UserAgent:    userAgent,
+		ListenMode:   listenMode(cfg.Inject, cfg.Mic),
 		OnListenStop: uplinkCancel,
 	}, buf, mcpHandler(disp), logger)
 	app = NewApp(cfg.WakeWord, cf, reg, &LinxCommandSink{Client: client}, out, logger)

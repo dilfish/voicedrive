@@ -1,6 +1,7 @@
 // audio.go 实现设备模拟器的真音频上行（02-linx §3，对齐 linx-emu 方案 A）：
 // --inject 从 WAV 文件读裸 PCM、--mic 经 ffmpeg 采集（macOS avfoundation），
-// 统一按 20ms 帧上行灵犀 WS，发完补 listen stop。
+// 统一按 20ms 帧上行灵犀 WS。收口分两种：--inject 走 manual（发完补 listen
+// stop），--mic 走 auto（平台端点检测自收口，设备不补 stop）。
 
 package main
 
@@ -48,9 +49,10 @@ func waitSession(ctx context.Context, c *linx.Client, warnEvery time.Duration, l
 }
 
 // streamUplink 把 r 中的 PCM 按 20ms 帧上行：Wake 注入本地唤醒、pace>0 时按帧
-// 间隔配速；正常发完补 listen stop 收口，ctx 中途取消则不再补（平台已收口或
-// 进程退出，重复 stop 无意义）。
-func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Duration) error {
+// 间隔配速；stopAtEOF 为 true 时正常发完补 listen stop 收口（manual 模式），
+// false 时不补（auto 模式由平台端点检测收口，设备补 stop 会打断连续对话）。
+// ctx 中途取消一律不补 stop（平台已收口或进程退出，重复 stop 无意义）。
+func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Duration, stopAtEOF bool) error {
 	c.Wake()
 	var tk *time.Ticker
 	if pace > 0 {
@@ -72,7 +74,9 @@ func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Du
 	if ctx.Err() != nil {
 		return nil
 	}
-	c.SendListenStop()
+	if stopAtEOF {
+		c.SendListenStop()
+	}
 	return nil
 }
 
@@ -86,7 +90,7 @@ func uplinkWAV(ctx context.Context, c *linx.Client, path string) error {
 	if err != nil {
 		return fmt.Errorf("解析 WAV: %w", err)
 	}
-	return streamUplink(ctx, c, bytes.NewReader(pcm), framePace)
+	return streamUplink(ctx, c, bytes.NewReader(pcm), framePace, true)
 }
 
 // uplinkMic 经 ffmpeg 采集麦克风 PCM 并实时上行（--mic，设备序号对 avfoundation
@@ -118,7 +122,7 @@ func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Dura
 	} else {
 		logger.Infof("麦克风持续采集（avfoundation 设备 :%s），说完由平台判定收口，Ctrl-C 退出", device)
 	}
-	return streamUplink(ctx, c, stdout, 0)
+	return streamUplink(ctx, c, stdout, 0, false)
 }
 
 // micContext 构造采集 ctx：dur=0 持续（无截止），dur>0 加 dur+2s 截止兜底

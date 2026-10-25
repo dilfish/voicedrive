@@ -296,6 +296,25 @@ func TestCommandLoop(t *testing.T) {
 	})
 }
 
+// TestListenMode --mic 走 auto（平台端点检测自收口，支持连续说话）；
+// --inject/纯指令保持 manual（设备音频发完补 listen stop 收口）。
+func TestListenMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		inject, mic string
+		want        string
+	}{
+		{"麦克风采集走 auto", "", "0", "auto"},
+		{"注入文件保持 manual", "/tmp/a.wav", "", "manual"},
+		{"两者皆空保持 manual", "", "", "manual"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, listenMode(tt.inject, tt.mic))
+		})
+	}
+}
+
 // --- OTA 引导（对齐 linx-emu 连接流程） ---
 
 // otaScript 是脚本化 OTA 应答器：按请求次数依次回放 script 中的响应体。

@@ -25,6 +25,7 @@ type Config struct {
 	DeviceID     string        // 设备 MAC，握手 Device-Id 头
 	ClientID     string        // 设备侧生成的 UUID，握手 Client-Id 头
 	UserAgent    string        // 握手 User-Agent 头
+	ListenMode   string        // listen start 模式：manual（默认，设备音频发完补 listen stop 收口）或 auto（平台端点检测自收口）
 	OnListenStop func()        // 平台下发 listen stop 时回调（状态机迁移后）；上行采集据此停麦收口，可为 nil
 }
 
@@ -37,6 +38,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.OutboxSize <= 0 {
 		c.OutboxSize = 64
+	}
+	if c.ListenMode == "" {
+		c.ListenMode = "manual"
 	}
 	return c
 }
@@ -112,6 +116,8 @@ type upstream struct {
 	Type      string `json:"type"`
 	State     string `json:"state"`
 	SessionID string `json:"session_id"`
+	// Text 承载 stt 识别结果与 llm/tts sentence_start 的回答分句文本。
+	Text string `json:"text"`
 	// Payload 保留原始 mcp payload，避免二次解析。
 	Payload json.RawMessage `json:"payload"`
 }
@@ -265,13 +271,13 @@ func (c *Client) handleText(data []byte) {
 	}
 	switch msg.Type {
 	case "hello":
-		// 平台确认握手并分配 session_id：记住它，随后自动开启 manual 监听，
-		// 与 linx-emu 参考实现一致（后续 listen.detect / abort 都要带该 id）。
+		// 平台确认握手并分配 session_id：记住它，随后按配置模式开启监听
+		// （后续 listen.detect / abort 都要带该 id）。
 		c.sessMu.Lock()
 		c.sessionID = msg.SessionID
 		c.sessMu.Unlock()
 		if b, err := json.Marshal(listenFrame{
-			Type: "listen", State: "start", Mode: "manual", SessionID: msg.SessionID,
+			Type: "listen", State: "start", Mode: c.cfg.ListenMode, SessionID: msg.SessionID,
 		}); err == nil {
 			c.SendText(b)
 		} else {
@@ -298,7 +304,21 @@ func (c *Client) handleText(data []byte) {
 				c.cfg.OnListenStop()
 			}
 		}
+	case "stt":
+		// 平台 ASR 终稿：打日志让"说了什么"可见，否则真机联调无法区分
+		// 识别失败与回复被静默丢弃。
+		if msg.Text != "" {
+			c.logger.Infof("linx: 识别: %s", msg.Text)
+		}
+	case "llm":
+		if msg.Text != "" {
+			c.logger.Infof("linx: 回答: %s", msg.Text)
+		}
 	case "tts":
+		if msg.State == "sentence_start" && msg.Text != "" {
+			// TTS 逐句下发回答正文；llm 帧可能只有情绪符号，分句才是给人看的文本。
+			c.logger.Infof("linx: 回答: %s", msg.Text)
+		}
 		switch msg.State {
 		case "start":
 			c.applyEvent(EventTTSStart)

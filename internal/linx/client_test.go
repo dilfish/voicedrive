@@ -3,8 +3,10 @@ package linx_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,4 +306,95 @@ func TestClient_ConcurrentSendWhileReceiving(t *testing.T) {
 	defer cancel()
 	_, err := buf.Pop(ctx)
 	require.NoError(t, err)
+}
+
+// captureLogger 记录 Infof 输出的 fake logger（下行文本显示断言用）。
+type captureLogger struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+func (l *captureLogger) Debugf(string, ...any) {}
+func (l *captureLogger) Warnf(string, ...any)  {}
+func (l *captureLogger) Errorf(string, ...any) {}
+
+func (l *captureLogger) Infof(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs = append(l.logs, fmt.Sprintf(format, args...))
+}
+
+func (l *captureLogger) infos() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.logs...)
+}
+
+func (l *captureLogger) hasInfo(want string) bool {
+	for _, s := range l.infos() {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClient_ListenModeConfigured ListenMode=auto 时 listen start 须带 mode:auto
+// （平台端点检测自收口，设备不补 listen stop）；默认 manual 由
+// TestClient_ServerHelloSession 固定，不重复断言。
+func TestClient_ListenModeConfigured(t *testing.T) {
+	srv := linxtest.New(t)
+	c := linx.NewClient(linx.Config{
+		URL: srv.URL(), BackoffBase: 5 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
+		ListenMode: "auto",
+	}, linx.NewAudioBuffer(), nil, logx.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+
+	texts := srv.WaitForTexts(t, 2) // 设备 hello + listen start
+	var listenStart map[string]any
+	require.NoError(t, json.Unmarshal([]byte(texts[1]), &listenStart))
+	require.Equal(t, map[string]any{
+		"type":       "listen",
+		"state":      "start",
+		"mode":       "auto",
+		"session_id": "sid-1",
+	}, listenStart)
+}
+
+// TestClient_ReplyFramesDisplayed 平台下行的 stt/llm/tts 分句文本须打 Info 日志：
+// 否则真机联调"说了没反应"时无法区分是识别失败还是回复被静默丢弃。
+func TestClient_ReplyFramesDisplayed(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame string
+		want  string
+	}{
+		{"stt 识别结果", `{"type":"stt","text":"小牛，现在几点了？"}`, "识别: 小牛，现在几点了？"},
+		{"llm 回答文本", `{"type":"llm","emotion":"thinking","text":"好的"}`, "回答: 好的"},
+		{"tts 分句文本", `{"type":"tts","state":"sentence_start","text":"现在是2026年"}`, "回答: 现在是2026年"},
+		{"stt 空文本不打日志", `{"type":"stt","text":""}`, "\x00never"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := linxtest.New(t)
+			lg := &captureLogger{}
+			c := linx.NewClient(linx.Config{
+				URL: srv.URL(), BackoffBase: 5 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
+			}, linx.NewAudioBuffer(), nil, lg)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go func() { _ = c.Run(ctx) }()
+			srv.WaitForTexts(t, 2)
+
+			require.NoError(t, srv.PushText(tt.frame))
+			if tt.want == "\x00never" {
+				time.Sleep(50 * time.Millisecond)
+				require.Empty(t, lg.infos(), "空文本不得打日志")
+				return
+			}
+			require.Eventually(t, func() bool { return lg.hasInfo(tt.want) }, 2*time.Second, 2*time.Millisecond)
+		})
+	}
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dilfish/voicedrive/internal/device"
 
 	"github.com/dilfish/voicedrive/internal/model"
 	"github.com/dilfish/voicedrive/internal/store"
@@ -191,6 +194,15 @@ func (h *Handler) uploadAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const maxAudio = 2 << 20
+	owns, err := h.store.OwnsMessage(r.Context(), r.PathValue("id"), mac)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if !owns {
+		failStatus(w, http.StatusForbidden, errors.New("message does not belong to device"))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAudio+1)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -206,20 +218,42 @@ func (h *Handler) uploadAudio(w http.ResponseWriter, r *http.Request) {
 		failStatus(w, http.StatusBadRequest, errors.New("audio exceeds 2MB"))
 		return
 	}
+	if bytes.HasPrefix(data, []byte("RIFF")) {
+		data, err = device.DecodeWAV(data)
+		if err != nil {
+			failStatus(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	if err := os.MkdirAll(h.audioDir, 0755); err != nil {
 		fail(w, fmt.Errorf("create audio directory: %w", err))
 		return
 	}
 	name := filepath.Base(r.PathValue("id")) + ".wav"
 	path := filepath.Join(h.audioDir, name)
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	temporary, err := os.CreateTemp(h.audioDir, ".upload-*")
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	defer os.Remove(temporary.Name())
+	_, writeErr := temporary.Write(data)
+	closeErr := temporary.Close()
+	if writeErr != nil {
+		fail(w, writeErr)
+		return
+	}
+	if closeErr != nil {
+		fail(w, closeErr)
+		return
+	}
+	if err := os.Rename(temporary.Name(), path); err != nil {
 		fail(w, fmt.Errorf("write audio: %w", err))
 		return
 	}
 	url := "/v1/messages/" + r.PathValue("id") + "/audio"
 	message, err := h.store.SetMessageAudio(r.Context(), r.PathValue("id"), mac, url, durationMS)
 	if err != nil {
-		_ = os.Remove(path)
 		fail(w, err)
 		return
 	}
@@ -239,19 +273,14 @@ func pcmDuration(data []byte) (int, bool) {
 	if len(data) == 0 || len(data)%2 != 0 {
 		return 0, false
 	}
-	if len(data) >= 44 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
-		if string(data[12:16]) != "fmt " || len(data) < 36 {
+	if bytes.HasPrefix(data, []byte("RIFF")) {
+		pcm, err := device.DecodeWAV(data)
+		if err != nil {
 			return 0, false
 		}
-		channels := int(data[22]) | int(data[23])<<8
-		rate := int(data[24]) | int(data[25])<<8 | int(data[26])<<16 | int(data[27])<<24
-		bits := int(data[34]) | int(data[35])<<8
-		if channels != 1 || rate != 16000 || bits != 16 {
-			return 0, false
-		}
-		return int((len(data) - 44) * 1000 / 32000), true
+		data = pcm
 	}
-	return int(len(data) * 1000 / 32000), true
+	return int(len(data) * 1000 / 32000), len(data) <= 60*32000
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {

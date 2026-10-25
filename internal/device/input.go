@@ -66,6 +66,9 @@ func (r *InputRunner) Run(ctx context.Context, config InputConfig) error {
 }
 
 func (r *InputRunner) submit(ctx context.Context, text string, pcm []byte) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("input requires recognized text")
+	}
 	now := time.Now
 	if r.Now != nil {
 		now = r.Now
@@ -79,9 +82,6 @@ func (r *InputRunner) submit(ctx context.Context, text string, pcm []byte) error
 			return err
 		}
 	}
-	if text == "" {
-		return errors.New("injected audio requires recognized text")
-	}
 	if err := r.Sender.Send(ctx, text); err != nil {
 		return fmt.Errorf("send input message: %w", err)
 	}
@@ -94,19 +94,48 @@ func ReadWAV(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read WAV: %w", err)
 	}
-	if len(data) < 44 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
+	return DecodeWAV(data)
+}
+
+// DecodeWAV reads PCM chunks, including files with metadata or extended fmt chunks.
+func DecodeWAV(data []byte) ([]byte, error) {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
 		return nil, errors.New("invalid WAV header")
 	}
-	if string(data[12:16]) != "fmt " {
-		return nil, errors.New("WAV fmt chunk is required")
+	end := uint64(binary.LittleEndian.Uint32(data[4:8])) + 8
+	if end != uint64(len(data)) {
+		return nil, errors.New("invalid WAV RIFF size")
 	}
-	channels := binary.LittleEndian.Uint16(data[22:24])
-	rate := binary.LittleEndian.Uint32(data[24:28])
-	bits := binary.LittleEndian.Uint16(data[34:36])
-	if channels != 1 || rate != 16000 || bits != 16 {
-		return nil, errors.New("WAV must be 16kHz mono 16-bit")
+	var pcm []byte
+	format := false
+	for offset := 12; offset < len(data); {
+		if len(data)-offset < 8 {
+			return nil, errors.New("truncated WAV chunk")
+		}
+		size := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		start := offset + 8
+		if size > uint64(len(data)-start) {
+			return nil, errors.New("truncated WAV chunk data")
+		}
+		chunk := data[start : start+int(size)]
+		switch string(data[offset : offset+4]) {
+		case "fmt ":
+			if len(chunk) < 16 || binary.LittleEndian.Uint16(chunk[:2]) != 1 || binary.LittleEndian.Uint16(chunk[2:4]) != 1 || binary.LittleEndian.Uint32(chunk[4:8]) != 16000 || binary.LittleEndian.Uint32(chunk[8:12]) != 32000 || binary.LittleEndian.Uint16(chunk[12:14]) != 2 || binary.LittleEndian.Uint16(chunk[14:16]) != 16 {
+				return nil, errors.New("WAV must be PCM 16kHz mono 16-bit")
+			}
+			format = true
+		case "data":
+			pcm = append(pcm, chunk...)
+		}
+		offset = start + int(size) + int(size%2)
+		if offset > len(data) {
+			return nil, errors.New("missing WAV chunk padding")
+		}
 	}
-	return append([]byte(nil), data[44:]...), nil
+	if !format || len(pcm) == 0 || len(pcm)%2 != 0 {
+		return nil, errors.New("WAV requires fmt and non-empty aligned data")
+	}
+	return pcm, nil
 }
 
 // RunREPL reads one text command per line and sends it as a message.
@@ -116,6 +145,9 @@ func (r *InputRunner) RunREPL(ctx context.Context, input io.Reader, output io.Wr
 	}
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		text := strings.TrimSpace(scanner.Text())
 		if text == "" {
 			continue

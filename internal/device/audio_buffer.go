@@ -30,6 +30,7 @@ type UtteranceBuffer struct {
 	mu         sync.Mutex
 	items      []utterance
 	limit      int
+	fallbacks  uint64
 	OnFallback func(string)
 }
 
@@ -46,6 +47,9 @@ func (b *UtteranceBuffer) Add(id, transcript string, pcm []byte, at time.Time) e
 	if len(pcm) == 0 || len(pcm)%2 != 0 {
 		return errors.New("utterance PCM must be non-empty 16-bit samples")
 	}
+	if len(pcm) > b.limit {
+		return errors.New("utterance exceeds 60 second buffer capacity")
+	}
 	copyPCM := append([]byte(nil), pcm...)
 	b.mu.Lock()
 	b.items = append(b.items, utterance{ID: id, At: at, PCM: copyPCM, Transcript: transcript})
@@ -61,16 +65,6 @@ func (b *UtteranceBuffer) Add(id, transcript string, pcm []byte, at time.Time) e
 	if start > 0 {
 		b.items = append([]utterance(nil), b.items[start:]...)
 	}
-	for len(b.items) > 1 {
-		total = 0
-		for _, item := range b.items {
-			total += len(item.PCM)
-		}
-		if total <= b.limit {
-			break
-		}
-		b.items = b.items[1:]
-	}
 	b.mu.Unlock()
 	return nil
 }
@@ -79,27 +73,58 @@ func (b *UtteranceBuffer) Add(id, transcript string, pcm []byte, at time.Time) e
 // It retries after punctuation normalization and then falls back to the newest utterance.
 func (b *UtteranceBuffer) Bind(transcript string) (string, []byte, bool) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if len(b.items) == 0 {
+		b.mu.Unlock()
 		return "", nil, false
 	}
 	normalized := normalizeTranscript(transcript)
 	index := -1
 	for i := range b.items {
-		if b.items[i].Transcript == transcript || normalizeTranscript(b.items[i].Transcript) == normalized {
+		if b.items[i].Transcript == transcript {
 			index = i
 			break
 		}
 	}
-	if index < 0 {
-		index = len(b.items) - 1
-		if b.OnFallback != nil {
-			b.OnFallback(transcript)
+	if index < 0 && normalized != "" {
+		for i := range b.items {
+			if normalizeTranscript(b.items[i].Transcript) == normalized {
+				index = i
+				break
+			}
 		}
 	}
+	fallback := index < 0
+	if index < 0 {
+		index = len(b.items) - 1
+		b.fallbacks++
+	}
 	item := b.items[index]
-	b.items = append(b.items[:index], b.items[index+1:]...)
+	copy(b.items[index:], b.items[index+1:])
+	b.items[len(b.items)-1] = utterance{}
+	b.items = b.items[:len(b.items)-1]
+	b.mu.Unlock()
+	if fallback && b.OnFallback != nil {
+		b.OnFallback(transcript)
+	}
 	return item.ID, append([]byte(nil), item.PCM...), true
+}
+
+// FallbackCount returns the number of binds that used the newest utterance.
+func (b *UtteranceBuffer) FallbackCount() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.fallbacks
+}
+
+// SetLatestTranscript attaches an STT result to the latest completed utterance.
+func (b *UtteranceBuffer) SetLatestTranscript(text string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.items) == 0 {
+		return false
+	}
+	b.items[len(b.items)-1].Transcript = text
+	return true
 }
 
 func normalizeTranscript(value string) string {
@@ -132,14 +157,14 @@ func (u *AudioUploader) Upload(ctx context.Context, messageID string, pcm []byte
 	}
 	client := u.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 5 * time.Second}
 	}
 	sleep := u.Sleeper
-	if sleep == nil {
-		sleep = time.Sleep
-	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(u.Endpoint, "/")+"/v1/messages/"+messageID+"/audio", bytes.NewReader(pcm))
 		if err != nil {
 			return fmt.Errorf("create audio upload request: %w", err)
@@ -173,7 +198,18 @@ func (u *AudioUploader) Upload(ctx context.Context, messageID string, pcm []byte
 			if u.OnRetry != nil {
 				u.OnRetry(attempt+1, lastErr)
 			}
-			sleep([]time.Duration{300 * time.Millisecond, time.Second}[attempt])
+			delay := []time.Duration{300 * time.Millisecond, time.Second}[attempt]
+			if sleep != nil {
+				sleep(delay)
+			} else {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				}
+			}
 		}
 	}
 	return lastErr

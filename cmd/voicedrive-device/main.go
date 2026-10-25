@@ -76,7 +76,11 @@ func main() {
 	defer stop()
 	if *say != "" || *inject != "" || *repl {
 		go func() {
-			<-connected
+			select {
+			case <-connected:
+			case <-ctx.Done():
+				return
+			}
 			runner := &device.InputRunner{Buffer: buffer, Sender: sender}
 			var err error
 			if *repl {

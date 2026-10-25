@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"encoding/binary"
+	"testing"
+)
 
 func TestPCM事Duration(t *testing.T) {
 	tests := []struct {
@@ -28,8 +31,11 @@ func TestPCM事Duration(t *testing.T) {
 func wavHeader(rate, channels, bits, dataSize int) []byte {
 	data := make([]byte, 44+dataSize)
 	copy(data[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
 	copy(data[8:12], "WAVE")
 	copy(data[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(data[16:20], 16)
+	data[20] = 1
 	data[22] = byte(channels)
 	data[24] = byte(rate)
 	data[25] = byte(rate >> 8)
@@ -37,5 +43,9 @@ func wavHeader(rate, channels, bits, dataSize int) []byte {
 	data[27] = byte(rate >> 24)
 	data[34] = byte(bits)
 	data[35] = byte(bits >> 8)
+	binary.LittleEndian.PutUint32(data[28:32], uint32(rate*channels*bits/8))
+	binary.LittleEndian.PutUint16(data[32:34], uint16(channels*bits/8))
+	copy(data[36:40], "data")
+	binary.LittleEndian.PutUint32(data[40:44], uint32(dataSize))
 	return data
 }

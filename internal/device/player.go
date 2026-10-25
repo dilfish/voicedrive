@@ -189,8 +189,15 @@ func (p *AFPlayer) Play(ctx context.Context, message model.DeviceMessage) error 
 	audioPath := message.AudioURL
 	cleanup := func() {}
 	if parsedURL, err := url.Parse(message.AudioURL); err == nil && (parsedURL.Scheme == "http" || parsedURL.Scheme == "https") {
-		response, err := http.Get(message.AudioURL)
+		request, err := http.NewRequestWithContext(playCtx, http.MethodGet, message.AudioURL, nil)
 		if err != nil {
+			return fmt.Errorf("create audio request: %w", err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			if playCtx.Err() != nil {
+				return ErrPlaybackInterrupted
+			}
 			return fmt.Errorf("download audio: %w", err)
 		}
 		defer response.Body.Close()
@@ -206,6 +213,9 @@ func (p *AFPlayer) Play(ctx context.Context, message model.DeviceMessage) error 
 		defer cleanup()
 		if _, err := io.Copy(temporary, response.Body); err != nil {
 			_ = temporary.Close()
+			if playCtx.Err() != nil {
+				return ErrPlaybackInterrupted
+			}
 			return fmt.Errorf("save downloaded audio: %w", err)
 		}
 		if err := temporary.Close(); err != nil {
@@ -222,7 +232,7 @@ func (p *AFPlayer) Play(ctx context.Context, message model.DeviceMessage) error 
 	return nil
 }
 
-// Stop is intentionally unsupported by the stateless demo player.
+// Stop cancels downloading or playing the current audio.
 func (p *AFPlayer) Stop() error {
 	p.mu.Lock()
 	cancel := p.cancel

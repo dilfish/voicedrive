@@ -83,7 +83,7 @@ flowchart LR
 { "type": "talk.end" }
 ```
 
-服务端在 `talk.begin` 时从 Redis `INCR group:seq:{group_id}` 领取 `seq`，向焦点群在线成员下发开场控制帧，随后逐帧转发：
+服务端在 `talk.begin` 时从 Redis `INCR talk:seq` 领取全局唯一 `seq`（全局单调 ⇒ 群内单调，兼作下行 demux 键，见 `03-voice-protocol.md` §2），向焦点群在线成员下发开场控制帧，随后逐帧转发（下行二进制帧带 6 字节头 `{seq u32, idx u16}`，多路说话人流交错 demux，见 03 §3）：
 
 下行（服务端 → 听众，每个并发说话人一路）：
 
@@ -114,7 +114,7 @@ WS 二进制帧 → per-stream jitter buffer(60~120ms) → Opus 解码 → PCM 1
 ### 3.4 片段落库与 seq
 
 - 一次 `talk.begin` ~ `talk.end` = 一个对讲片段，**片段即消息**。
-- `seq` 群内单调递增（Redis INCR 保证），随片段落库；`last_acked_seq` 字段保留（补播 V1 启用，本期只写不读）。
+- `seq` 全局分配（`INCR talk:seq`）、群内单调递增，随片段落库；断线/截断片段标 `truncated: true`（03 §2/§5）；`last_acked_seq` 字段保留（补播 V1 启用，本期只写不读）。
 - 音频正文 V0 直接存 MongoDB（`audio: BinData`，Opus 帧拼接），单片段超 512KB 转.GridFS（预留）。
 
 ---
@@ -137,7 +137,7 @@ WS 二进制帧 → per-stream jitter buffer(60~120ms) → Opus 解码 → PCM 1
 | Key | 类型/TTL | 用途 |
 | --- | --- | --- |
 | `online:{mac}` | string / WS 断开删除 | 在线状态与 WS 会话归属 |
-| `group:seq:{group_id}` | INCR | 群内 seq 分配 |
+| `talk:seq` | INCR | 对讲流/片段 seq 全局分配（全局单调 ⇒ 群内单调，03 §2） |
 | `idem:{mac}:{tool}:{fingerprint}` | SETNX / 30s | 写操作幂等去重（约束 §8） |
 
 ---
@@ -191,7 +191,7 @@ MCP 工具 `group.*` 的服务端承载：灵犀 LLM 发起 tools/call → 设�
 | `talk` / `talk.end` | 对讲流开/收口 | 见 §3.2 |
 | `announce` | 群内播报（入群/退群/改名/拍一拍/邀请） | `{ "group": "...", "text": "徐工已经退出了群聊" }`，text ≤40 字 |
 | `pending_invite` | 上线补投递邀请 | `{ "from_alias": "...", "group": "..." , "expires_at": ...}` |
-| `focus_changed` | 焦点变更确认 | `{ "group": "..." }`，设备端随之播一次安全提示（恰好一次） |
+| `focus_changed` | 焦点变更确认 | `{ "group": "...", "closed_seqs": [...] }`（切群拆除的在途流，设备立即清 jitter buffer，03 §6.2），设备端随之播一次安全提示（恰好一次） |
 
 `announce` 的出声由设备端本地 TTS 完成（V0 用系统 TTS，见 02-linx §11 待确认项）。
 
@@ -200,6 +200,7 @@ MCP 工具 `group.*` 的服务端承载：灵犀 LLM 发起 tools/call → 设�
 ## 7. 连接管理与并发模型
 
 - **连接生命周期**：上线注册（Redis `online:{mac}`）、心跳（30s ping/pong）、断线清理与订阅回收；重连后按服务端落库的焦点群自动恢复订阅（焦点不随连接丢失）。
+- **talk 守卫**：活跃流 3s 无帧、WS 断开、重复 `talk.begin`、说话人退群 → 服务端强制收口/自愈（03 §5.2），收口语义与流-群绑定不变性见 03 §6。
 - **Hub**：每群一个转发 goroutine，持有听众写通道表；说话人泵 goroutine 只写该通道——避免跨群锁。
 - **慢消费者**：每听众带缓冲 channel（容量 64 帧 ≈ 4s），满则**丢最旧音频帧并递增 `dropped` 计数**，不阻塞转发路径（实时优先）。
 - **写 WS 单 goroutine**：每连接一个写泵串行化所有下行（音频帧 + 控制帧），杜绝并发写同一连接。

@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/server"
-	"github.com/dilfish/voicedrive/internal/store"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/server"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/store"
 )
 
 func main() {

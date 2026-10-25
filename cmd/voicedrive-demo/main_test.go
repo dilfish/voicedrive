@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dilfish/voicedrive/internal/demo"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/demo"
 )
 
 func TestReport(t *testing.T) {

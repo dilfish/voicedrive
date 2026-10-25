@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/dilfish/voicedrive/internal/demo"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/demo"
 )
 
 func run(args []string, output io.Writer) int {

@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dilfish/voicedrive/internal/device"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/device"
 
-	"github.com/dilfish/voicedrive/internal/model"
-	"github.com/dilfish/voicedrive/internal/store"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/store"
 )
 
 type Handler struct {

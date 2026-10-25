@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dilfish/voicedrive/internal/scriptmock"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/scriptmock"
 )
 
 func TestRun(t *testing.T) {

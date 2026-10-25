@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/commandapp"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/commandapp"
 )
 
 func run(ctx context.Context, args []string, input io.ReadCloser, output io.Writer) int {

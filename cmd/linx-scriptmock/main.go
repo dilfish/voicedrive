@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/scriptmock"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/scriptmock"
 )
 
 func run(ctx context.Context, args []string, output io.Writer) int {

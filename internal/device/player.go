@@ -13,7 +13,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/dilfish/voicedrive/internal/model"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
 )
 
 var ErrPlaybackInterrupted = errors.New("playback interrupted")

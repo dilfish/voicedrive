@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/dilfish/voicedrive/internal/model"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
 )
 
 //go:embed schema.sql

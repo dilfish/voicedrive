@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/command"
-	"github.com/dilfish/voicedrive/internal/grouptools"
-	"github.com/dilfish/voicedrive/internal/lingxi"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/command"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/grouptools"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/lingxi"
 )
 
 // Config injects both endpoints without changing the existing control-plane client.

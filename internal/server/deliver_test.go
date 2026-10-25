@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/dilfish/voicedrive/internal/model"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
 )
 
 func TestEncodeFrame(t *testing.T) {

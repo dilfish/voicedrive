@@ -60,7 +60,8 @@ flowchart TB
 
 - `audio.Capture`：独立 goroutine 泵，PCM 块经 channel 分发给**两个消费者**——提醒词检测器（§5）与（命中后）编码上行；不命中则转发给对讲通道。
 - `audio.Playback`：单一输出流。**两路来源在此汇合**：灵犀 TTS 帧、对讲混音输出（01-voice-group §3.3）。合成音与对讲原声**逐样本相加播放**（不做打断），保证群内对讲不被系统播报切掉。
-- 无麦克风降级（product-v2 §2.1）：终端文本输入以提醒词开头 → 视作 ASR 结果直接进指令通道（跳过采音）；不以提醒词开头 → 提示"对讲需音频，请用麦克风或注入文件"。`--inject file.opus` 注入音频等同一次开口。
+- 无麦克风降级（product-v2 §2.1）：终端文本输入以提醒词开头 → 视作 ASR 结果直接进指令通道（跳过采音）；不以提醒词开头 → 提示"对讲需音频，请用麦克风或注入文件"。`--inject file.wav`（16k/mono/s16 WAV，取 data chunk 按 20ms/640B 帧真实节奏上行）与 `--mic N`（ffmpeg avfoundation 采集，实时上行）都等同一次开口：直通进指令会话（§1 分流豁免）。收口：WAV 自然播完补 listen stop；麦克风默认持续采集（`--mic-duration` 0，定长传如 `--mic-duration 5s`），说完由平台 ASR 下发 listen stop 自动停麦，Ctrl-C 退出。stdin EOF（后台/nohup 启动）不退出进程，设备保持在线直至 Ctrl-C/SIGTERM。
+- 对讲通道（通道 A）的帧封装、talk 会话边界（VAD 起止/预滚/尾静默/120s 上限）、下行流 demux 与切群在途流处理见 `03-voice-protocol.md`。
 
 ---
 
@@ -70,8 +71,15 @@ flowchart TB
 
 ### 4.1 连接与握手
 
-- 端点：`ws://xrobo-io.qiniuapi.com/v1/ws/`（demo 环境为 ws，生产 wss；鉴权方式平台文档未公开，见 §11 待确认）。
-- 连接建立后立即发送 hello（对齐 client-demo / hardware-mcp ①）：
+引导流程对齐 linx-emu 参考实现（dilfish/voicedrive `cmd/linx-emu`），分两步：
+
+1. **OTA 上报**（`POST https://xrobo.qiniuapi.com/v1/ota/`，Headers：`Activation-Version: 1`、`Device-Id: <mac>`、`Client-Id: <uuid>`、`User-Agent`、`Accept-Language: zh-CN`；body 携带 `version/uuid/application/board/mac_address/chip_model_name`）：
+   - 未绑定 → 返回 `{"activation":{"code","message"}}`，终端打印 6 位激活码，每 5s 轮询直至控制台「添加设备」完成绑定；
+   - 已绑定 → 返回 `{"websocket":{"url","token"}}`，token 用于握手，url 非空时覆盖默认端点。
+   - `--token`/`LINX_TOKEN` 显式给 token 时跳过 OTA。
+2. **WS 握手**：端点 `ws://xrobo-io.qiniuapi.com/v1/ws/`（生产 wss），握手带 5 个头：`Authorization: Bearer <token>`、`Protocol-Version: 1`、`Device-Id: <mac>`、`Client-Id: <uuid>`、`User-Agent`。
+
+连接建立后立即发送 hello（上行裸 PCM，20ms 一帧 320 采样）：
 
 ```json
 {
@@ -79,13 +87,20 @@ flowchart TB
   "version": 1,
   "features": { "mcp": true },
   "transport": "websocket",
-  "audio_params": { "sample_rate": 16000, "channels": 1, "format": "opus", "frame_ms": 60 }
+  "audio_params": {
+    "format": "pcm", "sample_rate": 16000, "channels": 1,
+    "bit_depth": 16, "endianness": "little",
+    "frame_duration": 20, "frame_size": 320,
+    "sample_format": "signed_int16", "play_buffer_duration": 300
+  }
 }
 ```
 
+平台回 `{"type":"hello","session_id":...}` 确认握手并分配会话 id，端上随即自动发送 `{"type":"listen","state":"start","mode":"manual","session_id":...}`；此后 `listen.detect`（文本上行，等价"用户说了这句话"）与 `abort` 均须携带该 session_id。
+
 ### 4.2 消息路由
 
-- **二进制帧** = Opus 音频（上行：指令会话期采集流；下行：TTS 音频 → `AudioBuffer`）。
+- **二进制帧** = 裸 PCM 音频（16k/单声道/16bit 小端，20ms 一帧 640 字节；上行：指令会话期采集流；下行：TTS 音频 → `AudioBuffer`）。
 - **文本帧** = JSON 控制。按字段分派：
   - ASR/LLM/TTS 生命周期事件（`listen`/`tts` 的 start/stop）→ 驱动状态机；
   - `type: "mcp"` 的外层信封 → 剥出 JSON-RPC 2.0 payload 交给 MCP 分发器（§6）。
@@ -99,7 +114,7 @@ idle ──唤醒命中──> listening ──ASR stop──> thinking(LLM/tool
                                         clarify(pending question) <── 10s 窗口，见 §7
 ```
 
-- `listening`：持续上行 Opus 帧；VAD 静默或平台 `listen stop` 指令结束。
+- `listening`：持续上行 PCM 帧；VAD 静默或平台 `listen stop` 指令结束。
 - `speaking`：`AudioBuffer` 有数据即连续播放至 `tts_state=idle`；播放期间采集不中断（用户可抢话，是否打断由平台决定，端上不本地打断）。
 - 重连：指数退避（1s/2s/…上限 30s），重连成功重发 hello；离线期间对讲通道不受影响（两条连接彼此独立）。
 
@@ -218,12 +233,15 @@ stateDiagram-v2
 ## 8. Go 包结构
 
 ```
-cmd/voicedrive-device/        # 模拟器入口：--mac --alias --wake-word --server --inject；终端 UI（滚动区+状态区）
+cmd/voicedrive-device/        # 模拟器入口：--mac --alias --wake-word --server --inject/--mic；终端 UI（滚动区+状态区）
 internal/audio/               # Capture/Playback 抽象 + malgo 实现
 internal/opus/                # libopus 编解码（Encode(960 samples)→Opus 帧 / Decode 逆）
+internal/vad/                 # VAD 分段（onset/offset 事件流）：驱动提醒词检测窗口（§1）与 talk 会话边界（03 §5.1）
 internal/wakeword/            # Detector 接口 + prefixText 实现（kws 可选）
 internal/linx/                # 灵犀 WS 客户端：hello、消息路由、状态机、重连
 internal/linx/audiobuffer.go  # TTS 生产者-消费者缓冲（mutex+cond+atomic）
+internal/talk/                # 对讲 WS 客户端（通道 A，直连 voicedrive-server）：talk 会话边界（预滚/尾静默/120s 上限）、下行 6 字节头 demux、已宣布 seq 集合与 unknown-seq 丢弃、切群前 talk.end 截断（03）
+internal/talk/mixer.go        # per-stream jitter buffer + 多路 PCM 逐样本相加与饱和钳位（01 §3.3；idx 丢帧检测见 03 §3）
 internal/mcp/                 # JSON-RPC 分发、Tool 注册表、schema 生成、错误码
 internal/groupclient/         # voicedrive HTTP API 客户端（X-VD-MAC 注入、幂等透传）
 internal/confirm/             # 确认语境状态机（§7）
@@ -240,6 +258,7 @@ internal/confirm/             # 确认语境状态机（§7）
 | WS 连接写（音频帧/控制帧/mcp 响应并发产生） | 并发写 panic | 单写泵 goroutine + 带 buffered channel，串行化一切下行 |
 | `AudioBuffer`（TTS 生产者 vs 播放消费者） | 竞态 | mutex + cond（对齐 linx-linux 语义），`has_data` 原子标记 |
 | 输出设备（TTS vs 对讲混音流） | 两写者互踩 | 播放侧单汇合点：两路 PCM 相加后由唯一播放 goroutine 写设备 |
+| 对讲 jitter/混音（多路流解码 vs 播放泵） | 竞态 | 每路流独立 jitter buffer + 解码，仅在播放汇合点由唯一 goroutine 逐样本相加（01 §3.3） |
 | 会话状态机（WS 事件 vs 采集泵 vs 定时器） | 状态撕裂 | 状态仅经单一事件 channel 变更（actor 化），无锁 |
 | Pending 状态（10s 定时器 vs 裸答输入） | 双触发 | 定时器到期与输入处理同 channel 串行，先到先得 |
 
@@ -258,7 +277,7 @@ internal/confirm/             # 确认语境状态机（§7）
 
 | # | 事项 | 当前假设 |
 | --- | --- | --- |
-| 1 | 灵犀 WS 鉴权字段（token/mac 参数位置） | hello 内或查询参数，联调时定 |
+| 1 | ~~灵犀 WS 鉴权字段（token/mac 参数位置）~~ | **已确认（对齐 linx-emu）**：OTA 换 token + 握手 `Authorization: Bearer` 头，见 §4.1 |
 | 2 | ASR/TTS 生命周期事件的确切字段名 | `json.RawMessage` 透传 + 联调后固化 |
 | 3 | 麦克风场景的 KWS 选型 | 接口已隔离；V0 用注入文件/终端输入兜底 |
 | 4 | 系统播报（announce）本地 TTS 引擎 | macOS `say` / Linux `espeak`，与灵犀 TTS 音色差异即"机器话"信号 |

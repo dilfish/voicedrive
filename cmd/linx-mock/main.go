@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dilfish/voicedrive/internal/mock"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/mock"
 )
 
 func main() {

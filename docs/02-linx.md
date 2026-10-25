@@ -61,6 +61,7 @@ flowchart TB
 - `audio.Capture`：独立 goroutine 泵，PCM 块经 channel 分发给**两个消费者**——提醒词检测器（§5）与（命中后）编码上行；不命中则转发给对讲通道。
 - `audio.Playback`：单一输出流。**两路来源在此汇合**：灵犀 TTS 帧、对讲混音输出（01-voice-group §3.3）。合成音与对讲原声**逐样本相加播放**（不做打断），保证群内对讲不被系统播报切掉。
 - 无麦克风降级（product-v2 §2.1）：终端文本输入以提醒词开头 → 视作 ASR 结果直接进指令通道（跳过采音）；不以提醒词开头 → 提示"对讲需音频，请用麦克风或注入文件"。`--inject file.opus` 注入音频等同一次开口。
+- 对讲通道（通道 A）的帧封装、talk 会话边界（VAD 起止/预滚/尾静默/120s 上限）、下行流 demux 与切群在途流处理见 `03-voice-protocol.md`。
 
 ---
 
@@ -221,9 +222,12 @@ stateDiagram-v2
 cmd/voicedrive-device/        # 模拟器入口：--mac --alias --wake-word --server --inject；终端 UI（滚动区+状态区）
 internal/audio/               # Capture/Playback 抽象 + malgo 实现
 internal/opus/                # libopus 编解码（Encode(960 samples)→Opus 帧 / Decode 逆）
+internal/vad/                 # VAD 分段（onset/offset 事件流）：驱动提醒词检测窗口（§1）与 talk 会话边界（03 §5.1）
 internal/wakeword/            # Detector 接口 + prefixText 实现（kws 可选）
 internal/linx/                # 灵犀 WS 客户端：hello、消息路由、状态机、重连
 internal/linx/audiobuffer.go  # TTS 生产者-消费者缓冲（mutex+cond+atomic）
+internal/talk/                # 对讲 WS 客户端（通道 A，直连 voicedrive-server）：talk 会话边界（预滚/尾静默/120s 上限）、下行 6 字节头 demux、已宣布 seq 集合与 unknown-seq 丢弃、切群前 talk.end 截断（03）
+internal/talk/mixer.go        # per-stream jitter buffer + 多路 PCM 逐样本相加与饱和钳位（01 §3.3；idx 丢帧检测见 03 §3）
 internal/mcp/                 # JSON-RPC 分发、Tool 注册表、schema 生成、错误码
 internal/groupclient/         # voicedrive HTTP API 客户端（X-VD-MAC 注入、幂等透传）
 internal/confirm/             # 确认语境状态机（§7）
@@ -240,6 +244,7 @@ internal/confirm/             # 确认语境状态机（§7）
 | WS 连接写（音频帧/控制帧/mcp 响应并发产生） | 并发写 panic | 单写泵 goroutine + 带 buffered channel，串行化一切下行 |
 | `AudioBuffer`（TTS 生产者 vs 播放消费者） | 竞态 | mutex + cond（对齐 linx-linux 语义），`has_data` 原子标记 |
 | 输出设备（TTS vs 对讲混音流） | 两写者互踩 | 播放侧单汇合点：两路 PCM 相加后由唯一播放 goroutine 写设备 |
+| 对讲 jitter/混音（多路流解码 vs 播放泵） | 竞态 | 每路流独立 jitter buffer + 解码，仅在播放汇合点由唯一 goroutine 逐样本相加（01 §3.3） |
 | 会话状态机（WS 事件 vs 采集泵 vs 定时器） | 状态撕裂 | 状态仅经单一事件 channel 变更（actor 化），无锁 |
 | Pending 状态（10s 定时器 vs 裸答输入） | 双触发 | 定时器到期与输入处理同 channel 串行，先到先得 |
 

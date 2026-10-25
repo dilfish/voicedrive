@@ -84,6 +84,19 @@ func (h *deliveryHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	previous := h.clients[client.deviceID]
 	h.clients[client.deviceID] = client
+	activeGroup, activeGroupErr := h.store.ActiveGroup(r.Context(), device.ID)
+	if activeGroupErr != nil && !errors.Is(activeGroupErr, store.ErrNotFound) {
+		delete(h.clients, client.deviceID)
+		h.mu.Unlock()
+		client.close()
+		return
+	}
+	if activeGroupErr == nil && !h.enqueue(client, deviceFrame{Type: "group_changed", Group: &activeGroup}) {
+		delete(h.clients, client.deviceID)
+		h.mu.Unlock()
+		client.close()
+		return
+	}
 	pending, err := h.store.PendingMessages(r.Context(), device.ID, maxPending)
 	if err != nil {
 		if h.clients[client.deviceID] == client {
@@ -188,6 +201,9 @@ func (h *deliveryHub) readPump(client *deviceClient) {
 				return
 			}
 		case "heartbeat":
+			if frame.GroupID == "" {
+				return
+			}
 			if err := h.store.AckDevice(context.Background(), client.deviceID, frame.GroupID, frame.LastAckedSeq); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return
 			}

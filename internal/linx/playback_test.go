@@ -101,19 +101,19 @@ func (r *sinkRecorder) lastData() string {
 	if len(r.sinks) == 0 {
 		return ""
 	}
-	return string(r.sinks[len(r.sinks)-1].data)
+	return r.sinks[len(r.sinks)-1].dataSnapshot()
 }
 
 func (r *sinkRecorder) lastClosed() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.sinks) > 0 && r.sinks[len(r.sinks)-1].closed
+	return len(r.sinks) > 0 && r.sinks[len(r.sinks)-1].closedSnapshot()
 }
 
 func (r *sinkRecorder) lastKilled() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.sinks) > 0 && r.sinks[len(r.sinks)-1].killed
+	return len(r.sinks) > 0 && r.sinks[len(r.sinks)-1].killedSnapshot()
 }
 
 func (r *sinkRecorder) allData() string {
@@ -121,7 +121,7 @@ func (r *sinkRecorder) allData() string {
 	defer r.mu.Unlock()
 	out := ""
 	for _, s := range r.sinks {
-		out += string(s.data)
+		out += s.dataSnapshot()
 	}
 	return out
 }

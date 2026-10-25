@@ -42,15 +42,15 @@ func writeHelper(t *testing.T, body string) string {
 func helperPID(t *testing.T, path string) int {
 	t.Helper()
 	pidFile := path + ".pid"
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(pidFile)
-		return err == nil
-	}, 2*time.Second, 2*time.Millisecond)
-	raw, err := os.ReadFile(pidFile)
-	require.NoError(t, err)
 	var pid int
-	_, err = fmt.Sscanf(string(raw), "%d", &pid)
-	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		_, err = fmt.Sscanf(string(raw), "%d", &pid)
+		return err == nil && pid > 0
+	}, 2*time.Second, 2*time.Millisecond)
 	return pid
 }
 

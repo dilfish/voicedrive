@@ -28,6 +28,7 @@ type Frame struct {
 type Server struct {
 	srv     *httptest.Server
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	conns   map[*websocket.Conn]struct{}
 	frames  []Frame
 	hsHdrs  []http.Header // 每条连接的握手请求头快照
@@ -76,12 +77,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.frames = append(s.frames, Frame{Binary: mt == websocket.BinaryMessage, Text: string(data)})
 		s.mu.Unlock()
 		if mt == websocket.TextMessage && isHello(data) {
+			s.writeMu.Lock()
 			_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			reply, err := json.Marshal(map[string]any{"type": "hello", "session_id": sid})
 			if err != nil {
+				s.writeMu.Unlock()
 				return
 			}
-			if err := ws.WriteMessage(websocket.TextMessage, reply); err != nil {
+			writeErr := ws.WriteMessage(websocket.TextMessage, reply)
+			s.writeMu.Unlock()
+			if writeErr != nil {
 				return
 			}
 		}
@@ -160,6 +165,8 @@ func (s *Server) PushBinary(b []byte) error {
 }
 
 func (s *Server) push(mt int, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ws := range s.conns {

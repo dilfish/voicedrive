@@ -50,9 +50,63 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_status TEXT NOT NULL DEFAULT 'pending'`); err != nil {
 		return fmt.Errorf("add message audio status: %w", err)
 	}
+	if _, err := p.db.ExecContext(ctx, `ALTER TABLE memberships ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return fmt.Errorf("add membership mute state: %w", err)
+	}
 	if _, err := p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id)
 SELECT device_id,group_id FROM memberships ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("backfill device group acknowledgements: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) JoinGroup(ctx context.Context, mac, inviteCode string) (model.Group, error) {
+	var group model.Group
+	err := p.db.QueryRowContext(ctx, `SELECT id::text,name,owner_device_id::text,invite_code,next_seq,created_at FROM groups WHERE invite_code=$1`, strings.TrimSpace(inviteCode)).
+		Scan(&group.ID, &group.Name, &group.OwnerID, &group.InviteCode, &group.NextSeq, &group.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Group{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Group{}, fmt.Errorf("find group by invite code: %w", err)
+	}
+	if _, err := p.AddMember(ctx, group.ID, mac, ""); err != nil {
+		return model.Group{}, err
+	}
+	return group, nil
+}
+
+func (p *Postgres) ListGroups(ctx context.Context, mac string) ([]model.Group, string, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT g.id::text,g.name,g.owner_device_id::text,g.invite_code,g.next_seq,g.created_at
+FROM groups g JOIN memberships m ON m.group_id=g.id JOIN devices d ON d.id=m.device_id WHERE d.mac=$1 ORDER BY g.created_at`, mac)
+	if err != nil {
+		return nil, "", fmt.Errorf("list groups: %w", err)
+	}
+	defer rows.Close()
+	groups := []model.Group{}
+	for rows.Next() {
+		var g model.Group
+		if err := rows.Scan(&g.ID, &g.Name, &g.OwnerID, &g.InviteCode, &g.NextSeq, &g.CreatedAt); err != nil {
+			return nil, "", err
+		}
+		groups = append(groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	var active string
+	_ = p.db.QueryRowContext(ctx, `SELECT COALESCE(active_group_id::text,'') FROM devices WHERE mac=$1`, mac).Scan(&active)
+	return groups, active, nil
+}
+
+func (p *Postgres) SetGroupMuted(ctx context.Context, mac, groupID string, muted bool) error {
+	result, err := p.db.ExecContext(ctx, `UPDATE memberships m SET muted=$3 FROM devices d WHERE d.id=m.device_id AND d.mac=$1 AND m.group_id=$2`, mac, groupID, muted)
+	if err != nil {
+		return fmt.Errorf("set group mute: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -315,7 +369,7 @@ RETURNING id::text,name,owner_device_id::text,invite_code,next_seq,created_at`, 
 
 func (p *Postgres) AddMember(ctx context.Context, groupID, mac, alias string) (model.Membership, error) {
 	if strings.TrimSpace(alias) == "" {
-		return model.Membership{}, errors.New("alias is required")
+		alias = "设备" + mac
 	}
 	var m model.Membership
 	err := p.db.QueryRowContext(ctx, `INSERT INTO memberships(group_id,device_id,alias)

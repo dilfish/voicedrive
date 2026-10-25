@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Study-of-slag-weng/voicedrive1/internal/audiosrc"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/device"
 	"github.com/Study-of-slag-weng/voicedrive1/internal/linx"
 	"github.com/Study-of-slag-weng/voicedrive1/internal/logx"
 )
@@ -82,6 +83,10 @@ func streamUplink(ctx context.Context, c *linx.Client, r io.Reader, pace time.Du
 
 // uplinkWAV 读取 WAV 文件并按真实节奏上行其 data chunk（--inject，等同一次开口）。
 func uplinkWAV(ctx context.Context, c *linx.Client, path string) error {
+	return uplinkWAVWithBuffer(ctx, c, path, nil)
+}
+
+func uplinkWAVWithBuffer(ctx context.Context, c *linx.Client, path string, buffer *device.UtteranceBuffer) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读 WAV: %w", err)
@@ -90,13 +95,18 @@ func uplinkWAV(ctx context.Context, c *linx.Client, path string) error {
 	if err != nil {
 		return fmt.Errorf("解析 WAV: %w", err)
 	}
+	if buffer != nil {
+		if err := buffer.Add("inject-"+path, "", pcm, time.Now()); err != nil {
+			return fmt.Errorf("缓存原声: %w", err)
+		}
+	}
 	return streamUplink(ctx, c, bytes.NewReader(pcm), framePace, true)
 }
 
 // uplinkMic 经 ffmpeg 采集麦克风 PCM 并实时上行（--mic，设备序号对 avfoundation
 // 而言形如 ":0"；需安装 ffmpeg，macOS 还需给终端麦克风权限）。dur>0 为定长
 // 采集兜底；dur=0 持续采集，说完由平台 listen stop 判定收口。
-func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Duration, stderr io.Writer, logger logx.Logger) error {
+func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Duration, stderr io.Writer, logger logx.Logger, buffer *device.UtteranceBuffer) error {
 	cctx, cancel := micContext(ctx, dur)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "ffmpeg",
@@ -122,7 +132,30 @@ func uplinkMic(ctx context.Context, c *linx.Client, device string, dur time.Dura
 	} else {
 		logger.Infof("麦克风持续采集（avfoundation 设备 :%s），说完由平台判定收口，Ctrl-C 退出", device)
 	}
-	return streamUplink(ctx, c, stdout, 0, false)
+	var captured bytes.Buffer
+	err = streamUplinkWithCapture(ctx, c, stdout, &captured)
+	if err == nil && captured.Len() > 0 && buffer != nil {
+		if addErr := buffer.Add("mic-"+time.Now().Format("20060102150405.000000000"), "", captured.Bytes(), time.Now()); addErr != nil {
+			return fmt.Errorf("缓存麦克风原声: %w", addErr)
+		}
+	}
+	return err
+}
+
+func streamUplinkWithCapture(ctx context.Context, c *linx.Client, source io.Reader, captured *bytes.Buffer) error {
+	err := audiosrc.Frames(source, pcmFrameBytes, func(frame []byte) {
+		if ctx.Err() == nil {
+			captured.Write(frame)
+			c.SendAudio(frame)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("帧化 PCM: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return nil
 }
 
 // micContext 构造采集 ctx：dur=0 持续（无截止），dur>0 加 dur+2s 截止兜底

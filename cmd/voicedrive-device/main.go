@@ -49,7 +49,7 @@ func parseFlags(args []string) (config, error) {
 	token := fs.String("token", os.Getenv("LINX_TOKEN"), "WS token，留空自动走 OTA 引导")
 	inject := fs.String("inject", "", "注入 WAV 音频文件（16k/mono/s16，等同一次开口）")
 	mic := fs.String("mic", "", "用电脑麦克风采集上行（ffmpeg avfoundation 设备序号，如 0），需装 ffmpeg")
-	micDur := fs.Duration("mic-duration", 0, "--mic 采集时长；0=持续采集，说完由平台 listen stop 收口，Ctrl-C 退出")
+	micDur := fs.Duration("mic-duration", 0, "--mic 采集时长（如 5s、30s）；0=持续采集，说完由平台 listen stop 收口，Ctrl-C 退出")
 	if err := fs.Parse(args); err != nil {
 		return config{}, fmt.Errorf("解析参数: %w", err)
 	}
@@ -146,7 +146,7 @@ func run(cfg config) error {
 	if cfg.Inject != "" || cfg.Mic != "" {
 		// 注入/麦克风等同一次开口（02 §3）：会话就绪后上行，失败只报错不影响指令循环。
 		go func() {
-			if err := waitSession(uplinkCtx, client); err != nil {
+			if err := waitSession(uplinkCtx, client, 5*time.Second, logger); err != nil {
 				logger.Warnf("音频上行: %v", err)
 				return
 			}
@@ -164,14 +164,27 @@ func run(cfg config) error {
 		}()
 	}
 
-	sc := bufio.NewScanner(os.Stdin)
-	fmt.Fprint(out, "> ")
-	for sc.Scan() {
-		app.HandleLine(sc.Text())
-		fmt.Fprint(out, "> ")
+	if err := commandLoop(ctx, os.Stdin, app.HandleLine, out); err != nil {
+		return fmt.Errorf("命令循环: %w", err)
 	}
 	stop()
-	return sc.Err()
+	return nil
+}
+
+// commandLoop 逐行读取输入交给 handle 处理；stdin EOF 后不退出进程，
+// 阻塞等待 ctx 结束——后台/nohup 启动时输入流关闭，设备长驻进程不得随之死亡。
+func commandLoop(ctx context.Context, r io.Reader, handle func(string), out io.Writer) error {
+	sc := bufio.NewScanner(r)
+	fmt.Fprint(out, "> ")
+	for sc.Scan() {
+		handle(sc.Text())
+		fmt.Fprint(out, "> ")
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("读 stdin: %w", err)
+	}
+	<-ctx.Done()
+	return nil
 }
 
 // bootstrapToken 走 OTA 引导（对齐 linx-emu 连接流程）：未绑定设备把激活码

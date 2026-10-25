@@ -26,7 +26,9 @@ const pcmFrameBytes = 640
 const framePace = 20 * time.Millisecond
 
 // waitSession 等待平台 hello 分配 session_id（音频上行与 listen 帧都依赖它）。
-func waitSession(ctx context.Context, c *linx.Client) error {
+// 等不到时每 warnEvery 打一条提示，区分"在等平台"与"进程卡死"。
+func waitSession(ctx context.Context, c *linx.Client, warnEvery time.Duration, logger logx.Logger) error {
+	lastWarn := time.Now()
 	tk := time.NewTicker(100 * time.Millisecond)
 	defer tk.Stop()
 	for {
@@ -37,6 +39,10 @@ func waitSession(ctx context.Context, c *linx.Client) error {
 		case <-ctx.Done():
 			return fmt.Errorf("等待会话被取消: %w", ctx.Err())
 		case <-tk.C:
+			if time.Since(lastWarn) >= warnEvery {
+				lastWarn = time.Now()
+				logger.Warnf("仍在等待平台会话（连接灵犀并收到 hello 后自动就绪）…")
+			}
 		}
 	}
 }

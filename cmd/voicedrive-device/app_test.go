@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -243,6 +244,56 @@ func TestParseFlags(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// errCmdReader 恒定返回 err 的 Reader（命令循环读错误用例）。
+type errCmdReader struct{ err error }
+
+func (r *errCmdReader) Read([]byte) (int, error) { return 0, r.err }
+
+// TestCommandLoop 验证命令循环语义：逐行分发；stdin EOF 后进程保持在线，
+// 阻塞至 ctx 结束（后台/nohup 启动时输入流关闭不得杀掉设备进程）。
+func TestCommandLoop(t *testing.T) {
+	t.Run("逐行处理并在 EOF 后保持在线", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var mu sync.Mutex
+		var got []string
+		out := &syncBuf{}
+		done := make(chan error, 1)
+		go func() {
+			done <- commandLoop(ctx, strings.NewReader("hello\nworld\n"), func(line string) {
+				mu.Lock()
+				defer mu.Unlock()
+				got = append(got, line)
+			}, out)
+		}()
+
+		// EOF 后短窗内不得返回（曾经的 bug：EOF 即退出）。
+		select {
+		case err := <-done:
+			t.Fatalf("stdin EOF 后不应退出: %v", err)
+		case <-time.After(150 * time.Millisecond):
+		}
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("ctx 取消后 commandLoop 未返回")
+		}
+		mu.Lock()
+		require.Equal(t, []string{"hello", "world"}, got)
+		mu.Unlock()
+		require.Equal(t, 3, strings.Count(out.String(), "> "), "每次读行前一个提示符（含 EOF 前）")
+	})
+
+	t.Run("读错误被包装返回", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := commandLoop(ctx, &errCmdReader{err: errors.New("boom")}, func(string) {}, io.Discard)
+		require.ErrorContains(t, err, "读 stdin")
+		require.ErrorContains(t, err, "boom")
+	})
 }
 
 // --- OTA 引导（对齐 linx-emu 连接流程） ---

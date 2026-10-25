@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS memberships (
     PRIMARY KEY (group_id, device_id)
 );
 
+CREATE TABLE IF NOT EXISTS group_aliases (
+    group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (group_id, alias)
+);
+
+CREATE INDEX IF NOT EXISTS group_aliases_alias_idx ON group_aliases(alias);
+
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY,
     group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,

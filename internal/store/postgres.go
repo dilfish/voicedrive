@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/Study-of-slag-weng/voicedrive1/internal/groupresolve"
 	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
 )
 
@@ -52,6 +53,52 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id)
 SELECT device_id,group_id FROM memberships ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("backfill device group acknowledgements: %w", err)
+	}
+	return nil
+}
+
+// ResolveGroupCandidates returns only groups joined by the device, with their
+// explicit aliases and member counts for deterministic name resolution.
+func (p *Postgres) ResolveGroupCandidates(ctx context.Context, mac string) ([]groupresolve.Candidate, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT g.id::text,g.name,g.owner_device_id::text,g.invite_code,g.next_seq,g.created_at,
+       COUNT(DISTINCT members.device_id), COALESCE(array_agg(DISTINCT ga.alias) FILTER (WHERE ga.alias IS NOT NULL), ARRAY[]::text[])
+FROM groups g JOIN memberships mine ON mine.group_id=g.id JOIN devices d ON d.id=mine.device_id
+LEFT JOIN memberships members ON members.group_id=g.id LEFT JOIN group_aliases ga ON ga.group_id=g.id
+WHERE d.mac=$1 GROUP BY g.id ORDER BY g.created_at,g.id`, mac)
+	if err != nil {
+		return nil, fmt.Errorf("query group candidates: %w", err)
+	}
+	defer rows.Close()
+	var candidates []groupresolve.Candidate
+	for rows.Next() {
+		var candidate groupresolve.Candidate
+		if err := rows.Scan(&candidate.Group.ID, &candidate.Group.Name, &candidate.Group.OwnerID, &candidate.Group.InviteCode, &candidate.Group.NextSeq, &candidate.Group.CreatedAt, &candidate.Members, &candidate.Aliases); err != nil {
+			return nil, fmt.Errorf("scan group candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate group candidates: %w", err)
+	}
+	return candidates, nil
+}
+
+// AddGroupAlias adds a normalized spoken alias. It is idempotent per group.
+func (p *Postgres) AddGroupAlias(ctx context.Context, mac, groupID, alias string) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return errors.New("group alias is required")
+	}
+	result, err := p.db.ExecContext(ctx, `INSERT INTO group_aliases(group_id,alias)
+SELECT $2,$3 FROM devices d JOIN memberships m ON m.device_id=d.id AND m.group_id=$2
+WHERE d.mac=$1 ON CONFLICT DO NOTHING`, mac, groupID, alias)
+	if err != nil {
+		return fmt.Errorf("add group alias: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read group alias result: %w", err)
+	} else if count == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

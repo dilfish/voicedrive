@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Study-of-slag-weng/voicedrive1/internal/device"
+	"github.com/Study-of-slag-weng/voicedrive1/internal/groupresolve"
 
 	"github.com/Study-of-slag-weng/voicedrive1/internal/model"
 	"github.com/Study-of-slag-weng/voicedrive1/internal/store"
@@ -35,6 +36,8 @@ func NewHandler(s *store.Postgres) http.Handler {
 	mux.HandleFunc("POST /v1/groups/{id}/members", h.member)
 	mux.HandleFunc("POST /v1/groups/{id}/switch", h.switchGroup)
 	mux.HandleFunc("POST /v1/groups/switch", h.switchGroupByName)
+	mux.HandleFunc("POST /v1/group/switch", h.switchGroupByName)
+	mux.HandleFunc("POST /v1/groups/{id}/aliases", h.groupAlias)
 	mux.HandleFunc("POST /v1/groups/{id}/messages", h.message)
 	mux.HandleFunc("POST /v1/messages/{id}/audio", h.uploadAudio)
 	mux.HandleFunc("GET /v1/messages/{id}/audio", h.getAudio)
@@ -136,7 +139,33 @@ func (h *Handler) switchGroupByName(w http.ResponseWriter, r *http.Request) {
 		failStatus(w, http.StatusBadRequest, errors.New("name is required"))
 		return
 	}
-	group, err := h.store.SwitchActiveGroupByName(r.Context(), mac, in.Name)
+	candidates, err := h.store.ResolveGroupCandidates(r.Context(), mac)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	resolution := groupresolve.Resolve(in.Name, candidates)
+	if resolution.Status == groupresolve.StatusNotFound {
+		write(w, http.StatusOK, struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		}{Status: "error", Message: "你还没有这个群，要新建吗？"})
+		return
+	}
+	if resolution.Status == groupresolve.StatusAmbiguous {
+		options := make([]string, len(resolution.Options))
+		for i := range resolution.Options {
+			options[i] = resolution.Options[i].Name
+		}
+		message := "是" + strings.Join(options, "还是") + "？"
+		write(w, http.StatusOK, struct {
+			Status  string   `json:"status"`
+			Message string   `json:"message"`
+			Options []string `json:"options"`
+		}{Status: "clarify", Message: message, Options: options})
+		return
+	}
+	group, err := h.store.SwitchActiveGroup(r.Context(), mac, resolution.Group.ID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -146,6 +175,25 @@ func (h *Handler) switchGroupByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSwitchResult(w, group)
+}
+
+func (h *Handler) groupAlias(w http.ResponseWriter, r *http.Request) {
+	mac := strings.TrimSpace(r.Header.Get("X-VD-MAC"))
+	if mac == "" {
+		failStatus(w, http.StatusBadRequest, errors.New("X-VD-MAC is required"))
+		return
+	}
+	var in struct {
+		Alias string `json:"alias"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if err := h.store.AddGroupAlias(r.Context(), mac, r.PathValue("id"), in.Alias); err != nil {
+		fail(w, err)
+		return
+	}
+	write(w, http.StatusCreated, map[string]string{"status": "ok", "alias": strings.TrimSpace(in.Alias)})
 }
 
 func writeSwitchResult(w http.ResponseWriter, group model.Group) {

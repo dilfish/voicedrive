@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS memberships (
     group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     alias TEXT NOT NULL,
+    muted BOOLEAN NOT NULL DEFAULT FALSE,
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (group_id, device_id)
 );

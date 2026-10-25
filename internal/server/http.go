@@ -42,12 +42,117 @@ func NewHandler(s *store.Postgres) http.Handler {
 	mux.HandleFunc("POST /v1/groups/{id}/switch", h.switchGroup)
 	mux.HandleFunc("POST /v1/groups/switch", h.switchGroupByName)
 	mux.HandleFunc("POST /v1/group/switch", h.switchGroupByName)
+	mux.HandleFunc("POST /v1/group/create", h.createV2Group)
+	mux.HandleFunc("POST /v1/group/join", h.joinV2Group)
+	mux.HandleFunc("POST /v1/group/mute", h.muteV2Group)
+	mux.HandleFunc("GET /v1/group/list", h.listV2Groups)
 	mux.HandleFunc("POST /v1/groups/{id}/aliases", h.groupAlias)
 	mux.HandleFunc("POST /v1/groups/{id}/messages", h.message)
 	mux.HandleFunc("POST /v1/messages/{id}/audio", h.uploadAudio)
 	mux.HandleFunc("GET /v1/messages/{id}/audio", h.getAudio)
 	mux.HandleFunc("GET /v1/device", h.hub.serveHTTP)
 	return mux
+}
+
+func requestMAC(r *http.Request) (string, error) {
+	mac := strings.TrimSpace(r.Header.Get("X-VD-MAC"))
+	if mac == "" {
+		return "", errors.New("X-VD-MAC is required")
+	}
+	return mac, nil
+}
+
+func (h *Handler) createV2Group(w http.ResponseWriter, r *http.Request) {
+	mac, err := requestMAC(r)
+	if err != nil {
+		failStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Name     string `json:"name"`
+		Passcode string `json:"passcode"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	g, err := h.store.CreateGroup(r.Context(), mac, in.Name, in.Passcode)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"status": "ok", "message": "群建好了，" + g.Name + "，口令 " + g.InviteCode, "group": g})
+}
+
+func (h *Handler) joinV2Group(w http.ResponseWriter, r *http.Request) {
+	mac, err := requestMAC(r)
+	if err != nil {
+		failStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Passcode string `json:"passcode"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	g, err := h.store.JoinGroup(r.Context(), mac, in.Passcode)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"status": "ok", "message": "已加入" + g.Name, "group": g})
+}
+
+func (h *Handler) muteV2Group(w http.ResponseWriter, r *http.Request) {
+	mac, err := requestMAC(r)
+	if err != nil {
+		failStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Name string `json:"name"`
+		On   bool   `json:"on"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	candidates, err := h.store.ResolveGroupCandidates(r.Context(), mac)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	resolution := groupresolve.Resolve(in.Name, candidates)
+	if resolution.Status != groupresolve.StatusMatched {
+		write(w, http.StatusOK, map[string]any{"status": "clarify", "message": "你说的是哪个群？"})
+		return
+	}
+	if err := h.store.SetGroupMuted(r.Context(), mac, resolution.Group.ID, in.On); err != nil {
+		fail(w, err)
+		return
+	}
+	text := "已取消静音"
+	if in.On {
+		text = "已静音"
+	}
+	write(w, http.StatusOK, map[string]string{"status": "ok", "message": text + resolution.Group.Name})
+}
+
+func (h *Handler) listV2Groups(w http.ResponseWriter, r *http.Request) {
+	mac, err := requestMAC(r)
+	if err != nil {
+		failStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	groups, active, err := h.store.ListGroups(r.Context(), mac)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if len(groups) == 0 {
+		write(w, http.StatusOK, map[string]string{"status": "error", "message": "你还没有加入群"})
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"status": "ok", "message": "你加入了" + fmt.Sprint(len(groups)) + "个群", "groups": groups, "active_group_id": active})
 }
 
 func (h *Handler) device(w http.ResponseWriter, r *http.Request) {

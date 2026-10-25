@@ -34,6 +34,7 @@ type Message struct {
 	FromDeviceID string    `json:"from_device_id"`
 	Text         string    `json:"text"`
 	AudioURL     string    `json:"audio_url"`
+	AudioStatus  string    `json:"audio_status"`
 	DurationMS   int       `json:"duration_ms"`
 	Seq          int64     `json:"seq"`
 	CreatedAt    time.Time `json:"created_at"`

@@ -31,10 +31,25 @@ var upgrader = websocket.Upgrader{
 type deviceFrame struct {
 	Type         string               `json:"type"`
 	Message      *model.DeviceMessage `json:"message,omitempty"`
+	MessageID    string               `json:"message_id,omitempty"`
+	Text         string               `json:"text,omitempty"`
 	Group        *model.Group         `json:"group,omitempty"`
 	GroupID      string               `json:"group_id,omitempty"`
 	Seq          int64                `json:"seq,omitempty"`
 	LastAckedSeq int64                `json:"last_acked_seq,omitempty"`
+}
+
+func (h *deliveryHub) notifyBind(ctx context.Context, message model.Message) error {
+	h.mu.RLock()
+	client := h.clients[message.FromDeviceID]
+	h.mu.RUnlock()
+	if client == nil {
+		return nil
+	}
+	if !h.enqueue(client, deviceFrame{Type: "bind_message", MessageID: message.ID, Text: message.Text}) {
+		h.remove(client)
+	}
+	return nil
 }
 
 type deviceClient struct {

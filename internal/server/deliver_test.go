@@ -26,7 +26,7 @@ func TestEncodeFrame(t *testing.T) {
 		{
 			name:  "message",
 			frame: deviceFrame{Type: "message", Message: &model.DeviceMessage{Message: model.Message{ID: "m1", Seq: 3}, GroupName: "夜班组"}},
-			want:  `{"type":"message","message":{"id":"m1","group_id":"","from_device_id":"","text":"","audio_url":"","duration_ms":0,"seq":3,"created_at":"0001-01-01T00:00:00Z","group_name":"夜班组"}}`,
+			want:  `{"type":"message","message":{"id":"m1","group_id":"","from_device_id":"","text":"","audio_url":"","audio_status":"","duration_ms":0,"seq":3,"created_at":"0001-01-01T00:00:00Z","group_name":"夜班组"}}`,
 		},
 	}
 	for _, tt := range tests {

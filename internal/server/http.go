@@ -3,7 +3,11 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dilfish/voicedrive/internal/model"
@@ -11,12 +15,17 @@ import (
 )
 
 type Handler struct {
-	store *store.Postgres
-	hub   *deliveryHub
+	store    *store.Postgres
+	hub      *deliveryHub
+	audioDir string
 }
 
 func NewHandler(s *store.Postgres) http.Handler {
-	h := &Handler{store: s, hub: newDeliveryHub(s)}
+	audioDir := os.Getenv("AUDIO_DIR")
+	if audioDir == "" {
+		audioDir = "./data/audio"
+	}
+	h := &Handler{store: s, hub: newDeliveryHub(s), audioDir: audioDir}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/devices", h.device)
 	mux.HandleFunc("POST /v1/groups", h.group)
@@ -24,6 +33,8 @@ func NewHandler(s *store.Postgres) http.Handler {
 	mux.HandleFunc("POST /v1/groups/{id}/switch", h.switchGroup)
 	mux.HandleFunc("POST /v1/groups/switch", h.switchGroupByName)
 	mux.HandleFunc("POST /v1/groups/{id}/messages", h.message)
+	mux.HandleFunc("POST /v1/messages/{id}/audio", h.uploadAudio)
+	mux.HandleFunc("GET /v1/messages/{id}/audio", h.getAudio)
 	mux.HandleFunc("GET /v1/device", h.hub.serveHTTP)
 	return mux
 }
@@ -159,11 +170,88 @@ func (h *Handler) message(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	if err := h.hub.broadcast(r.Context(), m); err != nil {
+	if m.AudioStatus == "pending" {
+		if err := h.hub.notifyBind(r.Context(), m); err != nil {
+			fail(w, err)
+			return
+		}
+	} else {
+		if err := h.hub.broadcast(r.Context(), m); err != nil {
+			fail(w, err)
+			return
+		}
+	}
+	write(w, http.StatusCreated, m)
+}
+
+func (h *Handler) uploadAudio(w http.ResponseWriter, r *http.Request) {
+	mac := strings.TrimSpace(r.Header.Get("X-VD-MAC"))
+	if mac == "" {
+		failStatus(w, http.StatusBadRequest, errors.New("X-VD-MAC is required"))
+		return
+	}
+	const maxAudio = 2 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxAudio+1)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		failStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	durationMS, valid := pcmDuration(data)
+	if !valid {
+		failStatus(w, http.StatusBadRequest, errors.New("audio must be 16kHz mono s16le PCM or WAV"))
+		return
+	}
+	if len(data) > maxAudio {
+		failStatus(w, http.StatusBadRequest, errors.New("audio exceeds 2MB"))
+		return
+	}
+	if err := os.MkdirAll(h.audioDir, 0755); err != nil {
+		fail(w, fmt.Errorf("create audio directory: %w", err))
+		return
+	}
+	name := filepath.Base(r.PathValue("id")) + ".wav"
+	path := filepath.Join(h.audioDir, name)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fail(w, fmt.Errorf("write audio: %w", err))
+		return
+	}
+	url := "/v1/messages/" + r.PathValue("id") + "/audio"
+	message, err := h.store.SetMessageAudio(r.Context(), r.PathValue("id"), mac, url, durationMS)
+	if err != nil {
+		_ = os.Remove(path)
 		fail(w, err)
 		return
 	}
-	write(w, http.StatusCreated, m)
+	if err := h.hub.broadcast(r.Context(), message); err != nil {
+		fail(w, err)
+		return
+	}
+	write(w, http.StatusOK, message)
+}
+
+func (h *Handler) getAudio(w http.ResponseWriter, r *http.Request) {
+	path := filepath.Join(h.audioDir, filepath.Base(r.PathValue("id"))+".wav")
+	http.ServeFile(w, r, path)
+}
+
+func pcmDuration(data []byte) (int, bool) {
+	if len(data) == 0 || len(data)%2 != 0 {
+		return 0, false
+	}
+	if len(data) >= 44 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
+		if string(data[12:16]) != "fmt " || len(data) < 36 {
+			return 0, false
+		}
+		channels := int(data[22]) | int(data[23])<<8
+		rate := int(data[24]) | int(data[25])<<8 | int(data[26])<<16 | int(data[27])<<24
+		bits := int(data[34]) | int(data[35])<<8
+		if channels != 1 || rate != 16000 || bits != 16 {
+			return 0, false
+		}
+		return int((len(data) - 44) * 1000 / 32000), true
+	}
+	return int(len(data) * 1000 / 32000), true
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {

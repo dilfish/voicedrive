@@ -46,6 +46,9 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, string(schemaSQL)); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if _, err := p.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_status TEXT NOT NULL DEFAULT 'pending'`); err != nil {
+		return fmt.Errorf("add message audio status: %w", err)
+	}
 	if _, err := p.db.ExecContext(ctx, `INSERT INTO device_group_acks(device_id,group_id)
 SELECT device_id,group_id FROM memberships ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("backfill device group acknowledgements: %w", err)
@@ -108,7 +111,7 @@ func (p *Postgres) PendingMessages(ctx context.Context, deviceID string, limit i
 		return []model.DeviceMessage{}, nil
 	}
 	rows, err := p.db.QueryContext(ctx, `SELECT m.id::text,m.group_id::text,m.from_device_id::text,m.text,
-m.audio_url,m.duration_ms,m.seq,m.created_at,g.name
+m.audio_url,m.audio_status,m.duration_ms,m.seq,m.created_at,g.name
 FROM messages m JOIN memberships member ON member.group_id=m.group_id
 JOIN devices d ON d.id=member.device_id JOIN groups g ON g.id=m.group_id
 JOIN device_group_acks ack ON ack.device_id=d.id AND ack.group_id=m.group_id
@@ -126,7 +129,7 @@ ORDER BY m.created_at,m.group_id,m.seq LIMIT $2`, deviceID, limit)
 	for rows.Next() {
 		var message model.DeviceMessage
 		if err := rows.Scan(&message.ID, &message.GroupID, &message.FromDeviceID, &message.Text,
-			&message.AudioURL, &message.DurationMS, &message.Seq, &message.CreatedAt, &message.GroupName); err != nil {
+			&message.AudioURL, &message.AudioStatus, &message.DurationMS, &message.Seq, &message.CreatedAt, &message.GroupName); err != nil {
 			return nil, fmt.Errorf("scan pending message: %w", err)
 		}
 		messages = append(messages, message)
@@ -328,9 +331,13 @@ AND EXISTS (SELECT 1 FROM memberships WHERE group_id=$1 AND device_id=$2) RETURN
 	}
 	var m model.Message
 	id := uuid.NewString()
-	err = tx.QueryRowContext(ctx, `INSERT INTO messages(id,group_id,from_device_id,text,audio_url,duration_ms,seq)
-VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id::text,group_id::text,from_device_id::text,text,audio_url,duration_ms,seq,created_at`, id, groupID, deviceID, text, audioURL, durationMS, seq).
-		Scan(&m.ID, &m.GroupID, &m.FromDeviceID, &m.Text, &m.AudioURL, &m.DurationMS, &m.Seq, &m.CreatedAt)
+	status := "pending"
+	if audioURL != "" {
+		status = "ready"
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO messages(id,group_id,from_device_id,text,audio_url,audio_status,duration_ms,seq)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text,group_id::text,from_device_id::text,text,audio_url,audio_status,duration_ms,seq,created_at`, id, groupID, deviceID, text, audioURL, status, durationMS, seq).
+		Scan(&m.ID, &m.GroupID, &m.FromDeviceID, &m.Text, &m.AudioURL, &m.AudioStatus, &m.DurationMS, &m.Seq, &m.CreatedAt)
 	if err != nil {
 		return model.Message{}, fmt.Errorf("insert message: %w", err)
 	}
@@ -347,6 +354,22 @@ VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id::text,group_id::text,from_device_id::t
 		return model.Message{}, fmt.Errorf("commit message: %w", err)
 	}
 	return m, nil
+}
+
+// SetMessageAudio stores the ready audio metadata after verifying message ownership.
+func (p *Postgres) SetMessageAudio(ctx context.Context, messageID, mac, audioURL string, durationMS int) (model.Message, error) {
+	var message model.Message
+	err := p.db.QueryRowContext(ctx, `UPDATE messages m SET audio_url=$3,audio_status='ready',duration_ms=$4
+FROM devices d WHERE m.id=$1 AND d.mac=$2 AND m.from_device_id=d.id
+RETURNING m.id::text,m.group_id::text,m.from_device_id::text,m.text,m.audio_url,m.audio_status,m.duration_ms,m.seq,m.created_at`, messageID, mac, audioURL, durationMS).
+		Scan(&message.ID, &message.GroupID, &message.FromDeviceID, &message.Text, &message.AudioURL, &message.AudioStatus, &message.DurationMS, &message.Seq, &message.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Message{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Message{}, fmt.Errorf("set message audio: %w", err)
+	}
+	return message, nil
 }
 
 func (p *Postgres) PutIdempotency(ctx context.Context, key string, value any) (bool, error) {

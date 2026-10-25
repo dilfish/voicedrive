@@ -107,8 +107,11 @@ type Client struct {
 
 // NewClient 构造客户端；onMCP 为 nil 时收到 mcp 信封仅告警不回复。
 func NewClient(cfg Config, buf *AudioBuffer, onMCP func(payload []byte) []byte, logger logx.Logger) *Client {
+	// 先落默认值再建 outbox：零值 OutboxSize 若用于 make 会得到无缓冲通道，
+	// 服务器不可达时首批 Send* 将永久阻塞调用方（main.go 只填 URL）。
+	cfg = cfg.withDefaults()
 	return &Client{
-		cfg:     cfg.withDefaults(),
+		cfg:     cfg,
 		buf:     buf,
 		onMCP:   onMCP,
 		logger:  logger,

@@ -123,6 +123,30 @@ func TestDispatcher_Notification(t *testing.T) {
 	require.Nil(t, d.Handle(nil, []byte(`{"jsonrpc":"2.0","method":"tools/list","params":{}}`)))
 }
 
+func TestNewDispatcherWithRegistry_SharedRegistry(t *testing.T) {
+	// 装配层持有 Registry 做确认重放，分发器用同一注册表应答平台 tools/call。
+	reg := NewRegistry()
+	require.NoError(t, reg.Register(Tool{
+		Name:        "group.list",
+		Description: "查群",
+		Handler:     func(Args) string { return "共 1 个群" },
+	}))
+	d := NewDispatcherWithRegistry(reg)
+	got := jsonBytes(t, d.Handle(nil, []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"group.list"}}`)))
+	result := got["result"].(map[string]any)
+	content := result["content"].([]any)[0].(map[string]any)
+	require.Equal(t, "共 1 个群", content["text"])
+	// 同一实例：注册表后补的工具对分发器立即可见
+	require.NoError(t, reg.Register(Tool{
+		Name:        "group.pat",
+		Description: "拍一拍",
+		Handler:     func(Args) string { return "已拍" },
+	}))
+	got = jsonBytes(t, d.Handle(nil, []byte(`{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}`)))
+	tools := got["result"].(map[string]any)["tools"].([]any)
+	require.Len(t, tools, 2)
+}
+
 func TestRegistry_RegisterValidation(t *testing.T) {
 	tests := []struct {
 		name string

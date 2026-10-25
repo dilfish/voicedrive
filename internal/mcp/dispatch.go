@@ -14,6 +14,10 @@ type Dispatcher struct {
 // NewDispatcher 构造携带空注册表的分发器，工具经 Register 注入。
 func NewDispatcher() *Dispatcher { return &Dispatcher{reg: NewRegistry()} }
 
+// NewDispatcherWithRegistry 用已有注册表构造分发器：装配层持有同一 Registry
+// 做确认语境的工具重放，分发应答与重放须看到同一份工具集。
+func NewDispatcherWithRegistry(reg *Registry) *Dispatcher { return &Dispatcher{reg: reg} }
+
 // Register 委托注册表（见 Registry.Register 的校验规则）。
 func (d *Dispatcher) Register(t Tool) error { return d.reg.Register(t) }
 

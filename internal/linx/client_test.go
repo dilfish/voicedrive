@@ -28,6 +28,28 @@ func newClient(t *testing.T, url string, onMCP func([]byte) []byte) (*linx.Clien
 	return c, buf
 }
 
+// 零值配置回归：main.go 只填 URL 构造客户端，OutboxSize 零值须落到默认缓冲，
+// 否则服务器不可达（写泵从未启动）时首批 Send* 永久阻塞调用方。
+func TestClient_ZeroValueConfigOutboxBuffered(t *testing.T) {
+	c := linx.NewClient(linx.Config{URL: "ws://127.0.0.1:1"}, linx.NewAudioBuffer(), nil, logx.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10; i++ {
+			c.SendAudio([]byte("f"))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("零值配置下 SendAudio 阻塞：OutboxSize 默认缓冲未生效")
+	}
+}
+
 func TestClient_Hello(t *testing.T) {
 	srv := linxtest.New(t)
 	_, _ = newClient(t, srv.URL(), nil)

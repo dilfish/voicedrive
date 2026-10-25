@@ -1,0 +1,5 @@
+{"version":1,"steps":[
+  {"op":"send","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unknown","arguments":{}}}}},
+  {"op":"expect","frame":{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown tool"}}}},
+  {"op":"disconnect"}
+]}

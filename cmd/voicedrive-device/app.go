@@ -52,7 +52,7 @@ func listenMode(inject, mic string) string {
 // App 承载终端文本分流（02 §3）与确认重放；HandleLine 仅由输入循环单线程
 // 调用，say 的锁仅为 onExpire 定时器 goroutine 的并发播报而设。
 type App struct {
-	matcher *wakeword.PrefixMatcher
+	matcher wakeword.TextMatcher
 	confirm *confirm.Machine
 	reg     *mcp.Registry
 	sink    CommandSink

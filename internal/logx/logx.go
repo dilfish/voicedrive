@@ -31,6 +31,9 @@ func NewStderr(level slog.Level) Logger {
 	return NewSlog(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
+// NewDefault returns the standard stderr logger without exposing slog to callers.
+func NewDefault() Logger { return NewStderr(slog.LevelInfo) }
+
 // NewNop 返回丢弃全部输出的实现，供测试使用。
 func NewNop() Logger { return nopLogger{} }
 

@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -92,7 +91,7 @@ func main() {
 
 // run 装配全部组件（构造函数注入，宪法 3.2）并阻塞至退出。
 func run(cfg config) error {
-	logger := logx.NewStderr(slog.LevelInfo)
+	logger := logx.NewDefault()
 	out := os.Stdout
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

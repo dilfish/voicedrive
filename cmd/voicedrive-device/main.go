@@ -200,6 +200,18 @@ func run(cfg config) error {
 		},
 	}, buf, mcpHandler(disp), logger)
 	app = NewApp(cfg.WakeWord, cf, reg, &LinxCommandSink{Client: client}, out, logger)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				cf.Expire(now)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	go func() {
 		if err := client.Run(ctx); err != nil {

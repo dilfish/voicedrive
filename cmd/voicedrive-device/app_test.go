@@ -514,9 +514,8 @@ func TestHandleLine_ConfirmExpiredAnnounce(t *testing.T) {
 		ArgKey:   "name",
 		TTL:      10 * time.Millisecond,
 	}))
-	require.Eventually(t, func() bool {
-		return strings.Contains(out.String(), ExpiredPhrase)
-	}, 2*time.Second, 2*time.Millisecond)
+	require.True(t, app.confirm.Expire(time.Now().Add(10*time.Millisecond)))
+	require.Contains(t, out.String(), ExpiredPhrase)
 
 	app.HandleLine("夜班组") // 超时作废后：非语境输入，走正常分流（无提醒词 → 提示对讲）
 	require.Equal(t, []string{}, sink.snapshot())

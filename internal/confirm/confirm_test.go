@@ -155,17 +155,34 @@ func TestActive_LazyExpire(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestTimer_FiresOnExpire(t *testing.T) {
+func TestExpire_ExplicitClock(t *testing.T) {
 	var mu sync.Mutex
 	var expired []Expired
-	m := New(time.Now, func(e Expired) { mu.Lock(); expired = append(expired, e); mu.Unlock() })
-	require.NoError(t, m.Ask(Pending{Question: "q", Options: []string{"要"}, Tool: "group.join", TTL: 10 * time.Millisecond}))
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(expired) == 1
-	}, time.Second, time.Millisecond)
+	now := time.Now()
+	m := New(nil, func(e Expired) { mu.Lock(); expired = append(expired, e); mu.Unlock() })
+	require.NoError(t, m.Ask(Pending{Question: "q", Options: []string{"要"}, Tool: "group.join"}, now))
+	require.False(t, m.Expire(now.Add(DefaultTTL-time.Nanosecond)))
+	require.True(t, m.Expire(now.Add(DefaultTTL)))
+	mu.Lock()
+	require.Len(t, expired, 1)
+	mu.Unlock()
 	require.False(t, m.Active())
+}
+
+func TestAsk_ExplicitDeadlineAndOriginalArgs(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	m := New(nil, nil)
+	require.NoError(t, m.Ask(Pending{
+		Question: "选哪个？", Options: []string{"甲组", "乙组"}, Tool: "group.switch",
+		Args:         map[string]any{"name": "旧值"},
+		OriginalArgs: map[string]any{"name": "原始值", "trace": "t1"},
+		ArgKey:       "name", Deadline: now.Add(time.Second),
+	}, now))
+	require.True(t, m.Active(now.Add(500*time.Millisecond)))
+	got := m.Answer("乙组", now.Add(500*time.Millisecond))
+	require.Equal(t, KindHit, got.Kind)
+	require.Equal(t, map[string]any{"name": "乙组", "trace": "t1"}, got.Args)
+	require.False(t, m.Active(now.Add(time.Second)))
 }
 
 func TestAsk_ReplacesPending(t *testing.T) {

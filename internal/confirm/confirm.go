@@ -18,12 +18,14 @@ const maxOptions = 3
 
 // Pending 是一次待确认的追问。
 type Pending struct {
-	Question string         // 反问话术，≤40 字，直接送 TTS
-	Options  []string       // 候选项，1~3 个
-	Tool     string         // 命中后待重放的工具名
-	Args     map[string]any // 触发 clarify 的原始工具参数
-	ArgKey   string         // 命中后用选项覆写的参数键（如 group.switch 的 name）；空则不覆写
-	TTL      time.Duration  // 存活窗口；≤0 取 DefaultTTL
+	Question     string         // 反问话术，≤40 字，直接送 TTS
+	Options      []string       // 候选项，1~3 个
+	Tool         string         // 命中后待重放的工具名
+	Args         map[string]any // 触发 clarify 的原始工具参数
+	OriginalArgs map[string]any // 明确命名的原始参数；优先于 Args
+	ArgKey       string         // 命中后用选项覆写的参数键（如 group.switch 的 name）；空则不覆写
+	TTL          time.Duration  // 存活窗口；≤0 取 DefaultTTL
+	Deadline     time.Time      // 非零时使用该绝对截止时间
 }
 
 // Expired 是超时作废事件的快照，供"先不管了，需要再说"播报使用。
@@ -50,15 +52,13 @@ type Result struct {
 	Answer string         // 命中的选项原文（canonical，供日志/播报）
 }
 
-// Machine 是确认语境状态机。并发安全：全部状态变更经同一把互斥锁串行，
-// 超时定时器与输入处理先到先得；过期回调在锁外执行、恰好触发一次
-// （只有赢得"清理"临界区的 goroutine 才回调）。
+// Machine 是确认语境状态机。并发安全：全部状态变更经同一把互斥锁串行；
+// 超时由调用方显式调用 Expire 驱动，过期回调在锁外执行且恰好触发一次。
 type Machine struct {
 	mu       sync.Mutex
 	now      func() time.Time
 	onExpire func(Expired)
 	pending  *pendingState
-	timer    *time.Timer
 }
 
 type pendingState struct {
@@ -75,9 +75,8 @@ func New(now func() time.Time, onExpire func(Expired)) *Machine {
 	return &Machine{now: now, onExpire: onExpire}
 }
 
-// Ask 进入 Pending；非法追问（缺问题/工具、选项数不在 1~3）返回错误且状态不变。
-// 已有 Pending 时新追问直接取代旧语境（旧定时器停止，不触发旧语境的 onExpire）。
-func (m *Machine) Ask(p Pending) error {
+// Ask 进入 Pending；调用方可传入 now，省略时使用构造时注入的时钟。
+func (m *Machine) Ask(p Pending, at ...time.Time) error {
 	if strings.TrimSpace(p.Question) == "" {
 		return fmt.Errorf("confirm: empty question")
 	}
@@ -91,30 +90,28 @@ func (m *Machine) Ask(p Pending) error {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	deadline := m.now().Add(ttl)
+	now := m.clock(at)
+	deadline := p.Deadline
+	if deadline.IsZero() {
+		deadline = now.Add(ttl)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.timer != nil {
-		m.timer.Stop()
-	}
 	m.pending = &pendingState{
 		question: p.Question,
 		options:  append([]string(nil), p.Options...),
 		tool:     p.Tool,
-		args:     p.Args,
+		args:     cloneArgs(firstArgs(p.Args, p.OriginalArgs)),
 		argKey:   p.ArgKey,
 		deadline: deadline,
 	}
-	// 定时器只是超时播报的主动触发器；是否过期一律以 now() 对 deadline 判定，
-	// 与 Answer/Active 的惰性检查同一条规则，定时器与输入先到先得。
-	m.timer = time.AfterFunc(time.Until(deadline), m.maybeExpire)
 	return nil
 }
 
 // Active 报告是否仍处于 Pending（顺带惰性清理已过期的语境）。
-func (m *Machine) Active() bool {
-	m.maybeExpire()
+func (m *Machine) Active(at ...time.Time) bool {
+	m.Expire(m.clock(at))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.pending != nil
@@ -124,14 +121,14 @@ func (m *Machine) Active() bool {
 //   - 命中选项（原文忽略大小写与首尾空白，或"第一个/1/一"类序数）→ KindHit + 重放信息；
 //   - 未命中 → KindMiss，语境作废，调用方须把该输入当作新指令重新走分流；
 //   - 回答时已超窗 → KindExpired；无语境 → KindNotPending。
-func (m *Machine) Answer(text string) Result {
+func (m *Machine) Answer(text string, at ...time.Time) Result {
 	m.mu.Lock()
 	p := m.pending
 	if p == nil {
 		m.mu.Unlock()
 		return Result{Kind: KindNotPending}
 	}
-	if !m.now().Before(p.deadline) {
+	if !m.clock(at).Before(p.deadline) {
 		m.clearLocked()
 		m.mu.Unlock()
 		m.notifyExpired(Expired{Question: p.question, Tool: p.tool})
@@ -157,17 +154,18 @@ func (m *Machine) Answer(text string) Result {
 	return Result{Kind: KindHit, Tool: p.tool, Args: args, Answer: p.options[idx]}
 }
 
-// maybeExpire 供定时器与 Active 惰性触发：到期则作废语境并回调 onExpire。
-func (m *Machine) maybeExpire() {
+// Expire 在调用方提供的时间点应用超时规则。
+func (m *Machine) Expire(at time.Time) bool {
 	m.mu.Lock()
 	p := m.pending
-	if p == nil || m.now().Before(p.deadline) {
+	if p == nil || at.Before(p.deadline) {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.clearLocked()
 	m.mu.Unlock()
 	m.notifyExpired(Expired{Question: p.question, Tool: p.tool})
+	return true
 }
 
 // notifyExpired 在锁外回调 onExpire（可能为 nil）。
@@ -180,10 +178,34 @@ func (m *Machine) notifyExpired(e Expired) {
 // clearLocked 置空语境并停表（须持锁调用）。
 func (m *Machine) clearLocked() {
 	m.pending = nil
-	if m.timer != nil {
-		m.timer.Stop()
-		m.timer = nil
+}
+
+func (m *Machine) clock(at []time.Time) time.Time {
+	if len(at) > 0 {
+		return at[0]
 	}
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+func firstArgs(args, original map[string]any) map[string]any {
+	if original != nil {
+		return original
+	}
+	return args
+}
+
+func cloneArgs(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // matchOption 先按选项原文匹配（TrimSpace + EqualFold），再按序数

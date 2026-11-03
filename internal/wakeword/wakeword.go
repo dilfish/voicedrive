@@ -11,11 +11,19 @@ type Detector interface {
 	Reset()
 }
 
+// TextMatcher is the V0 text-input counterpart to Detector. Keeping it small
+// lets callers replace prefix matching without depending on its implementation.
+type TextMatcher interface {
+	Match(text string) (hit bool, rest string)
+}
+
 // PrefixMatcher 终端文本输入的提醒词前缀匹配，V0 默认实现：
 // 以提醒词开头才命中（半句话边界）；命中后返回去掉提醒词与前导分隔符的剩余文本。
 type PrefixMatcher struct {
 	word string
 }
+
+var _ TextMatcher = (*PrefixMatcher)(nil)
 
 // NewPrefix 按提醒词构造匹配器；word 为空串时永不命中。
 func NewPrefix(word string) *PrefixMatcher {

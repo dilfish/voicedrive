@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -92,7 +91,7 @@ func main() {
 
 // run 装配全部组件（构造函数注入，宪法 3.2）并阻塞至退出。
 func run(cfg config) error {
-	logger := logx.NewStderr(slog.LevelInfo)
+	logger := logx.NewDefault()
 	out := os.Stdout
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -201,6 +200,18 @@ func run(cfg config) error {
 		},
 	}, buf, mcpHandler(disp), logger)
 	app = NewApp(cfg.WakeWord, cf, reg, &LinxCommandSink{Client: client}, out, logger)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				cf.Expire(now)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	go func() {
 		if err := client.Run(ctx); err != nil {

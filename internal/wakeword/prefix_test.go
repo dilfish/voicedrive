@@ -40,3 +40,10 @@ func TestPrefixMatcher_Match(t *testing.T) {
 		})
 	}
 }
+
+func TestPrefixMatcherImplementsTextMatcher(t *testing.T) {
+	var matcher TextMatcher = NewPrefix("小牛")
+	hit, rest := matcher.Match("小牛 建群")
+	require.True(t, hit)
+	require.Equal(t, "建群", rest)
+}
